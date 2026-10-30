@@ -20,6 +20,12 @@ pre-release, and a maintainer reviews and publishes it.
    `releases/latest/download/SecuridgeVault-windows-x64.zip` link in
    `download/README.md` and the main README points at it).
 
+**From the website instead of git:** Releases → *Draft a new release* →
+choose a new tag `v0.1.0` on `main` → *Publish release*. Publishing creates
+the tag, which starts the workflow; it attaches the zip and checksums to that
+release and fills in the notes (about 10 minutes, during which the download
+link returns "not found").
+
 **Dry run:** Actions → Release → *Run workflow* with the tag left empty
 builds, signs-if-configured and packages the current commit and uploads it
 as a workflow artifact. It creates no tag, release or attestation.

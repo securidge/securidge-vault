@@ -163,7 +163,7 @@ jobs:
             dist/securidge-vault.exe
             SecuridgeVault-windows-x64.zip
 
-      - name: Draft release
+      - name: Draft release (or attach to an existing one)
         if: env.DRY_RUN != 'true'
         shell: bash
         env:
@@ -194,6 +194,14 @@ jobs:
           } > notes.md
           # Not marked "pre-release": GitHub's "latest" link skips those. The
           # 0.x version and the notes above say it is not production-ready.
-          gh release create "$TAG" --draft --verify-tag \
-            --title "Securidge Vault $TAG" --notes-file notes.md \
-            SecuridgeVault-windows-x64.zip SHA256SUMS.txt
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # The release was created on the GitHub website ("Draft a new
+            # release" -> new tag -> Publish), which pushed the tag that
+            # started this run: attach the build to it.
+            gh release upload "$TAG" --clobber SecuridgeVault-windows-x64.zip SHA256SUMS.txt
+            gh release edit "$TAG" --title "Securidge Vault $TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" --draft --verify-tag \
+              --title "Securidge Vault $TAG" --notes-file notes.md \
+              SecuridgeVault-windows-x64.zip SHA256SUMS.txt
+          fi
