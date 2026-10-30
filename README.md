@@ -6,9 +6,9 @@
 
 ## Download
 
-**[⬇️ Download for Windows](https://github.com/securidge/securidge-vault/releases/latest/download/SecuridgeVault-windows-x64.zip)** · [How to run and verify](download/README.md) · [한국어 안내](download/README.md#한국어-안내)
+**[⬇️ Download SecuridgeVault.exe (Windows)](https://github.com/securidge/securidge-vault/releases/latest/download/SecuridgeVault.exe)** · [How to run and verify](download/README.md) · [한국어 안내](download/README.md#한국어-안내)
 
-The interface is in English by default; choose **Language / 언어 → 한국어** at the top right for Korean.
+Double-click the downloaded file to run it; there is no installer. The interface is in English by default; choose **Language / 언어 → 한국어** at the top right for Korean.
 
 ## What it does
 

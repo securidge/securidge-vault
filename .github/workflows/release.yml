@@ -139,6 +139,8 @@ jobs:
           # at the newest release (download/README.md links to it).
           $zip = "SecuridgeVault-windows-x64.zip"
           Compress-Archive -Path "$out\*" -DestinationPath $zip
+          # The app on its own as well, for a one-click download.
+          Copy-Item "$out\SecuridgeVault.exe" SecuridgeVault.exe
           $lines = foreach ($f in "$out\SecuridgeVault.exe", "$out\securidge-vault.exe", $zip) {
             "$((Get-FileHash $f -Algorithm SHA256).Hash.ToLower())  $(Split-Path $f -Leaf)"
           }
@@ -174,7 +176,9 @@ jobs:
             echo "> **Pre-alpha, not independently audited.** Do not use it for data you cannot afford to lose."
             echo "> **시험판(프리알파)이며 외부 보안 감사를 받지 않았습니다.** 잃으면 안 되는 데이터에는 쓰지 마세요."
             echo
-            echo "Download \`SecuridgeVault-windows-x64.zip\`, unzip, run \`SecuridgeVault.exe\`. No installer. Korean UI: top-right menu \"Language / 언어\"."
+            echo "**Download \`SecuridgeVault.exe\` below and double-click it.** No installer. (\`SecuridgeVault-windows-x64.zip\` also has the command-line tool and licences. The \"Source code\" archives are the source, not the program.) Korean UI: top-right menu \"Language / 언어\"."
+            echo
+            echo "**아래 \`SecuridgeVault.exe\`를 내려받아 더블클릭하면 바로 실행됩니다.** 설치가 필요 없습니다. (\"Source code\" 압축 파일은 소스코드라 실행파일이 없습니다.) 한국어 화면: 오른쪽 위 \"Language / 언어\" 메뉴."
             echo
             if [ "$SIGNED" = "true" ]; then
               echo "Binaries are Authenticode-signed."
@@ -198,10 +202,12 @@ jobs:
             # The release was created on the GitHub website ("Draft a new
             # release" -> new tag -> Publish), which pushed the tag that
             # started this run: attach the build to it.
-            gh release upload "$TAG" --clobber SecuridgeVault-windows-x64.zip SHA256SUMS.txt
-            gh release edit "$TAG" --title "Securidge Vault $TAG" --notes-file notes.md
+            gh release upload "$TAG" --clobber SecuridgeVault.exe SecuridgeVault-windows-x64.zip SHA256SUMS.txt
+            # Not a pre-release, so the "latest" download links resolve to it.
+            gh release edit "$TAG" --title "Securidge Vault $TAG" --notes-file notes.md \
+              --prerelease=false --latest
           else
             gh release create "$TAG" --draft --verify-tag \
               --title "Securidge Vault $TAG" --notes-file notes.md \
-              SecuridgeVault-windows-x64.zip SHA256SUMS.txt
+              SecuridgeVault.exe SecuridgeVault-windows-x64.zip SHA256SUMS.txt
           fi
