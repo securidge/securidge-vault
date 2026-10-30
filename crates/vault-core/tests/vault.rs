@@ -524,8 +524,11 @@ fn far_future_mtime_does_not_panic() {
     let f = dir.path().join("f.txt");
     fs::write(&f, b"x").unwrap();
     let file = fs::File::options().write(true).open(&f).unwrap();
-    let far = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1 << 40);
-    let _ = file.set_modified(far);
+    // On Windows this time is beyond FILETIME range, and `+` would panic —
+    // exactly the bug the library must avoid, so use checked_add here too.
+    if let Some(far) = std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_secs(1 << 40)) {
+        let _ = file.set_modified(far);
+    }
     drop(file);
     let k = key();
     let vpath = dir.path().join("v.svault");
