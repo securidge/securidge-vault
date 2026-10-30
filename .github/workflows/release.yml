@@ -69,30 +69,52 @@ jobs:
           export RUSTFLAGS="--remap-path-prefix=$(cygpath -w "$GITHUB_WORKSPACE")=. --remap-path-prefix=$(cygpath -w "$HOME/.cargo")=cargo -C link-arg=/Brepro"
           cargo build --release --locked -p vault-cli -p vault-gui
 
-      - name: Sign (Authenticode)
+      - name: Stage binaries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory unsigned | Out-Null
+          Copy-Item target\release\SecuridgeVault.exe, target\release\securidge-vault.exe unsigned
+
+      # Signing through SignPath (free for open source; the key stays in
+      # their HSM, as CA rules have required since June 2023). Runs only
+      # once the repository variable SIGNPATH_ORGANIZATION_ID and secret
+      # SIGNPATH_API_TOKEN exist. See docs/RELEASING.md.
+      - name: Upload unsigned binaries for signing
+        id: unsigned
+        if: vars.SIGNPATH_ORGANIZATION_ID != '' && env.DRY_RUN != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-binaries
+          path: unsigned/*.exe
+          if-no-files-found: error
+
+      - name: Sign (SignPath)
+        if: vars.SIGNPATH_ORGANIZATION_ID != '' && env.DRY_RUN != 'true'
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'securidge-vault' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      - name: Check signatures
         id: sign
         shell: pwsh
-        env:
-          CERT_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_PFX_BASE64 }}
-          CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
         run: |
-          if (-not $env:CERT_PFX_BASE64) {
+          if (-not (Test-Path signed)) {
+            Copy-Item -Recurse unsigned signed
             "signed=false" >> $env:GITHUB_OUTPUT
-            Write-Host "::warning::No signing certificate configured; the release will be UNSIGNED."
+            Write-Host "::warning::Signing is not configured; this build is UNSIGNED."
             exit 0
           }
-          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_PFX_BASE64))
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
-            Sort-Object FullName -Descending | Select-Object -First 1
-          foreach ($f in "target\release\SecuridgeVault.exe", "target\release\securidge-vault.exe") {
-            & $signtool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
-              /f $pfx /p $env:CERT_PASSWORD $f
-            if ($LASTEXITCODE -ne 0) { throw "signing failed for $f" }
-            & $signtool.FullName verify /pa $f
-            if ($LASTEXITCODE -ne 0) { throw "verification failed for $f" }
+          foreach ($f in Get-ChildItem signed\*.exe) {
+            $sig = Get-AuthenticodeSignature $f.FullName
+            if ($sig.Status -ne "Valid") { throw "$($f.Name): signature status $($sig.Status)" }
+            Write-Host "$($f.Name): signed by $($sig.SignerCertificate.Subject)"
           }
-          Remove-Item $pfx
           "signed=true" >> $env:GITHUB_OUTPUT
 
       - name: Package and checksum
@@ -100,7 +122,7 @@ jobs:
         run: |
           $out = "dist"
           New-Item -ItemType Directory $out | Out-Null
-          Copy-Item target\release\SecuridgeVault.exe, target\release\securidge-vault.exe $out
+          Copy-Item signed\SecuridgeVault.exe, signed\securidge-vault.exe $out
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, SECURITY.md $out
           $zip = "securidge-vault-$env:TAG-windows-x64.zip"
           Compress-Archive -Path "$out\*" -DestinationPath $zip

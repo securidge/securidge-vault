@@ -2,7 +2,7 @@
 
 **A portable, open-source encrypted archiver for Windows that needs two keys: a key file you carry and a password you remember.**
 
-> ⚠️ **Status: pre-alpha (M1 — command-line core).** No official release yet, and the software has **not** been independently audited. Do not use it for data you cannot afford to lose.
+> ⚠️ **Status: pre-alpha.** Desktop app and command line work; no official release yet, and the software has **not** been independently audited. Do not use it for data you cannot afford to lose.
 
 ## What it does
 
@@ -18,6 +18,10 @@
 - **There is no recovery.** Lose the key file or forget the password, and the data is gone. Nobody — including the author — can open it. Keep at least two backups of your key file.
 - It cannot protect you from malware already running on your PC while a vault is open.
 - No cloud, no accounts, no telemetry, no network access.
+
+## Quick start (desktop app)
+
+Run `SecuridgeVault.exe` (no installer). Start with **Create a key file**: choose a password, save the key file, and the app then walks you through saving two backup copies and checking them. After that, **Create a vault** (or drop files on the window) and **Open a vault** to list, extract, add or remove files.
 
 ## Quick start (command line)
 
@@ -39,7 +43,7 @@ securidge-vault rekey   --key E:\me.svkey --new-key E:\me2.svkey photos.svault
 securidge-vault info    photos.svault                     # which key it needs
 ```
 
-Passwords must be at least 15 characters; a few random words work well. Unlocking a key file takes a few seconds on purpose — that is what makes guessing passwords expensive.
+Passwords must be at least 15 characters and must not appear in a bundled list of breached passwords; a few random words work well. Unlocking a key file takes a few seconds on purpose — that is what makes guessing passwords expensive.
 
 **Change password vs. rekey:** `passwd` only re-encrypts the key file, so *old copies* of the key file still open with the *old* password. If you think the old password or a key file copy leaked, use `rekey`.
 
@@ -53,14 +57,15 @@ XChaCha20-Poly1305 for all encryption, Argon2id for the password, Zstandard comp
 
 ## Building
 
-Requires Rust 1.89+.
+Requires Rust 1.95+ for the desktop app (1.89+ for the core library and CLI).
 
 ```text
 cargo test
+cargo build --release -p vault-gui      # -> target/release/SecuridgeVault(.exe)
 cargo build --release -p vault-cli      # -> target/release/securidge-vault(.exe)
 ```
 
-Every push is built and tested on Windows and Linux by GitHub Actions; the unsigned Windows binary is available as a workflow artifact.
+Every push is built and tested on Windows and Linux by GitHub Actions, and the fuzz targets run for a few minutes; the unsigned Windows binaries are available as a workflow artifact. Releases are built by `.github/workflows/release.yml` (see [docs/RELEASING.md](docs/RELEASING.md)).
 
 ## Project layout
 
@@ -68,6 +73,9 @@ Every push is built and tested on Windows and Linux by GitHub Actions; the unsig
 |---|---|
 | `crates/vault-core` | Library: key files, vault format, cryptography, path safety |
 | `crates/vault-cli` | `securidge-vault` command-line tool |
+| `crates/vault-gui` | `SecuridgeVault` desktop app (egui) |
+| `test-vectors/v1` | Known-answer vectors for other implementations |
+| `fuzz` | `cargo-fuzz` targets |
 | `docs/DESIGN.md` | Design, threat model, file formats |
 
 ## Roadmap
@@ -76,9 +84,9 @@ Every push is built and tested on Windows and Linux by GitHub Actions; the unsig
 |---|---|
 | M0 Design | Done |
 | M1 Core library + CLI | Done |
-| M2 GUI | Next |
-| M3 Test vectors, fuzzing, crash tests | Planned |
-| M4 Signed releases | Planned |
+| M2 GUI | Done |
+| M3 Test vectors, fuzzing, crash tests | Done |
+| M4 Signed releases | Pipeline done; signing certificate not yet set up |
 | M5 External audit → v1.0 | Planned |
 
 ## Security

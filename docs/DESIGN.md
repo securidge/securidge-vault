@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Draft v0.2 — format v1 implemented in `vault-core` (M1) |
+| Status | Draft v0.3 — format v1 implemented; GUI (M2) and test hardening (M3) done; release pipeline (M4) in place |
 | Last updated | 2026-10-30 |
 | Scope | Windows desktop, single-user, offline |
 
@@ -229,8 +229,8 @@ Based on NIST SP 800-63B Rev. 4.
 - Minimum **15 characters**. Maximum 256.
 - **No composition rules** (no forced uppercase / digit / symbol).
 - All Unicode accepted, including spaces; normalized with NFC before hashing.
-- Rejected if found in a **bundled offline list of common and breached passwords** (no network lookup). Target list size ≤ 5 MB compressed. **M1 status:** only a small built-in list plus repetition checks; the full list is still open (§12, question 4).
-- A strength meter and a passphrase generator (random words) are provided.
+- Rejected if found in a **bundled offline list of common and breached passwords** (no network lookup). Since shorter passwords are already refused, only breached passwords of 15–256 characters are bundled: 140,899 entries (2.5 MB uncompressed) from the SecLists `xato-net-10-million-passwords` list (MIT), NFC-normalised, lower-cased and binary-searched. Source and rebuild script: `crates/vault-core/data/README.md`, `scripts/build_password_list.py`. Repetition patterns and a few well-known phrases are also refused.
+- Planned, not yet implemented: a strength meter and a passphrase generator (random words). The GUI currently shows the policy result live while typing.
 
 ---
 
@@ -253,7 +253,7 @@ Each file is decrypted into a fresh temp file in its destination folder and then
 - a failed or tampered entry never touches the user's existing file;
 - without `overwrite`, the name is reserved with `create_new` first, so nothing that appears meanwhile is replaced.
 
-After each rename the parent folder is re-checked to be inside the destination. **Residual risk:** a local attacker who can write to the destination folder and races folder creation could still make one file land outside it before the re-check removes it. Fully closing this needs handle-relative file APIs (e.g., `cap-std`); planned for M3.
+All of this happens through directory handles, not path strings: the destination is opened once, and every lookup, folder creation, temp file and rename is relative to an open handle of the entry's folder (`cap-std`, `vault-core/src/destdir.rs`). A lookup that would leave the destination — including through a folder that a local attacker swaps for a link or junction mid-extraction — fails. Existing links in parent folders are refused outright. (Before M3 this was a path-based re-check with a small race window.)
 
 When adding files, inputs are opened without following a final link (`O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`) and checked to be regular files through the open handle.
 
@@ -275,7 +275,7 @@ When adding files, inputs are opened without following a final link (`O_NOFOLLOW
 
 - **Windows 10/11, x64.** Single executable, no runtime install.
 - **Language: Rust.** Memory safety matters more than usual in a tool that parses untrusted files and holds keys.
-- **GUI toolkit:** to be decided in M2 (candidates: egui, Slint). Requirement: statically linked, no WebView runtime dependency.
+- **GUI toolkit:** egui/eframe (OpenGL via glow), statically linked, no WebView runtime dependency. Crate `vault-gui`, binary `SecuridgeVault.exe`. Needs Rust 1.95+ (the core library and CLI keep 1.89).
 - **Core library is separate from the GUI** (`vault-core` crate), with a CLI for testing and scripting.
 
 ### 8.2 Main flows
@@ -285,7 +285,11 @@ When adding files, inputs are opened without following a final link (`O_NOFOLLOW
 - **Open vault** → select key file → password → file list → extract all / extract selected / add / replace / remove.
 - **Change password**, **Rekey**, **Verify backup**.
 
-The M1 CLI implements all of these as commands (`keygen`, `create`, `list`, `extract`, `add`, `remove`, `passwd`, `rekey`, `verify-key`, `info`). The CLI cannot enforce the two-copy backup step; it prints instructions instead. The GUI (M2) will enforce it.
+The GUI implements all of these. Its key-file flow cannot be finished without two backup copies (in folders different from the original and from each other; same-drive copies are flagged) and a verification step that reads every copy back and unlocks it with the password; skipping requires ticking "I accept that if I lose this key file or forget the password, my data is gone." Change password and rekey both lead straight into the same backup flow for the resulting key file. Slow work runs on a worker thread; closing the window while a vault is being rewritten is refused.
+
+The CLI implements the same operations as commands (`keygen`, `create`, `list`, `extract`, `add`, `remove`, `passwd`, `rekey`, `verify-key`, `info`). It cannot enforce the two-copy backup step; it prints instructions instead.
+
+GUI limitations today: no auto-lock timer (use Lock), no right-click menu integration, and password text may linger briefly in egui's internal buffers (undo history, text layout caches) even though the app's own copies are wiped.
 
 ### 8.3 Portability
 
@@ -297,9 +301,9 @@ The M1 CLI implements all of these as commands (`keygen`, `create`, `list`, `ext
 ## 9. Distribution and trust
 
 - Source code licensed under **MIT OR Apache-2.0** (the Rust ecosystem convention; Apache-2.0 adds an explicit patent grant).
-- Release binaries **code-signed**; SHA-256 checksums published with each release.
-- Reproducible builds are a goal for v1.x so others can verify the binary matches the source.
-- The app performs a self-integrity check at startup and warns if its signature is missing or invalid.
+- Release binaries **code-signed**; SHA-256 checksums published with each release. **M4 status:** `.github/workflows/release.yml` builds on a tag, signs with Authenticode when a certificate is configured as a repository secret (otherwise it marks the release *unsigned*), publishes `SHA256SUMS.txt` and GitHub build-provenance attestations, and stages a **draft** release for a person to publish. No certificate is configured yet. See `docs/RELEASING.md`.
+- Reproducible builds are a goal for v1.x so others can verify the binary matches the source. Release builds already strip build-machine paths (`--remap-path-prefix`) and use a deterministic PE header (`/Brepro`); bit-for-bit reproducibility has not been verified.
+- Planned, not yet implemented: a self-integrity check at startup that warns if the app's signature is missing or invalid (needs signed releases first).
 - An **independent security audit** is planned before v1.0 is recommended for real data. Until then, the README must state that the software is unaudited.
 
 ---
@@ -313,7 +317,13 @@ The M1 CLI implements all of these as commands (`keygen`, `create`, `list`, `ext
 - **Path-traversal suite** for §7.1.
 - **Crash tests**: kill the process mid-write; the previous vault must still open.
 
-M1 status: round-trip, every-byte-flip, every-truncation, entry-swap, key-mismatch, rekey, password-change, overwrite-refusal, symlink and path-rule tests are in `crates/vault-core/tests/` and run in CI on Windows and Linux. Not yet done: published test vectors, `cargo-fuzz` targets (only a basic random-input test for the index decoder exists), kill-mid-write crash tests.
+Status (M3): all of the above are in place and run in CI on Windows and Linux.
+
+- `crates/vault-core/tests/vault.rs` — round-trip, every-byte-flip, every-truncation, entry-swap, key-mismatch, rekey, password-change, overwrite-refusal, symlink and path rules.
+- `test-vectors/v1/` + `tests/vectors.rs` — published known-answer vectors, checked by the library *and* by a small reference reader written only from §4 of this document.
+- `fuzz/` — `cargo-fuzz` targets for the index decoder, key file parser, vault opener and path rules; `.github/workflows/fuzz.yml` runs each for 2 minutes per push and 30 minutes weekly.
+- `tests/crash.rs` — kills a child process (SIGKILL / TerminateProcess) at 12 points across add, replace, remove, rekey and password change; the survivor must open, authenticate, equal the complete old or new state, and accept further changes. Not covered: power loss (the OS may reorder writes the process already issued) and creating a brand-new vault, where a crash can leave an empty placeholder file at the target name.
+- `crates/vault-gui/tests/gui.rs` — headless GUI tests (egui_kittest) of the full key, backup, vault, rekey and password flows.
 
 ---
 
@@ -323,9 +333,9 @@ M1 status: round-trip, every-byte-flip, every-truncation, entry-swap, key-mismat
 |---|---|
 | **M0** | This design reviewed and frozen as format v1 — *done* |
 | **M1** | `vault-core` + CLI: key file, vault create/list/extract/add/remove, rekey, storage warnings, tests, KDF calibration — *done* |
-| **M2** | GUI for the main flows (§8.2), including enforced backup flow |
-| **M3** | Test vectors, fuzzing, crash tests, full breached-password list |
-| **M4** | Code signing, release pipeline, checksums |
+| **M2** | GUI for the main flows (§8.2), including enforced backup flow — *done* |
+| **M3** | Test vectors, fuzzing, crash tests, full breached-password list, handle-relative extraction — *done* |
+| **M4** | Code signing, release pipeline, checksums — *pipeline done; needs a signing certificate* |
 | **M5** | External security audit → v1.0 |
 
 ---
@@ -334,8 +344,9 @@ M1 status: round-trip, every-byte-flip, every-truncation, entry-swap, key-mismat
 
 1. ~~License~~ — decided: MIT OR Apache-2.0.
 2. **Crypto library:** M1 uses the RustCrypto crates (`chacha20poly1305` 0.10, `argon2` 0.5) — pure Rust, no C toolchain needed. Their audit history must be checked and recorded here before v1.0; switching to libsodium remains possible because the file format does not depend on the library.
-3. **GUI toolkit:** egui vs. Slint (§8.1).
-4. **Breached-password list:** source, licensing, and size (§6).
+3. ~~GUI toolkit~~ — decided: egui/eframe (§8.1).
+4. ~~Breached-password list~~ — decided: SecLists xato-net 10M, 15+ characters only (§6).
+7. **Code-signing certificate:** SignPath Foundation (free for open source), Azure Trusted Signing, or an OV certificate (§9, `docs/RELEASING.md`).
 5. **Hiding total vault size:** optional padding to size buckets — worth the overhead?
 6. **Key file on hardware tokens** (FIDO2 / smart card) as a v2 option.
 
