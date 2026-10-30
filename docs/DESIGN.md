@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Draft v0.1 (pre-implementation) |
+| Status | Draft v0.2 — format v1 implemented in `vault-core` (M1) |
 | Last updated | 2026-10-30 |
 | Scope | Windows desktop, single-user, offline |
 
@@ -105,7 +105,8 @@ FEK ──XChaCha20-Poly1305 (STREAM)──▶ decrypts index and entries
 
 - Salt: 16 random bytes per key file.
 - Default parameters: **memory 1 GiB, iterations 3, parallelism 4**, output 32 bytes.
-- Target: 1–3 seconds on a mid-range 2024 laptop. Calibrate during M1 and record results here.
+- Target: 1–3 seconds on a mid-range 2024 laptop.
+- Measured (M1, release build, 2-vCPU cloud VM): 2.6–3.1 s per unlock; first run in a process up to 5.7 s while 1 GiB is allocated. Re-measure on typical Windows laptops before v1.0.
 - Floor (refuse weaker): memory 256 MiB, iterations 3.
 - Ceiling when *reading* a key file (anti-DoS): memory 4 GiB, iterations 10. Files outside these bounds are rejected.
 - Parameters are stored in the key file header so they can be raised in future versions without breaking old files.
@@ -146,36 +147,47 @@ Offset  Size  Field
 Offset  Size  Field
 0       8     magic            "SVAULT\0\1"
 8       2     format_version   u16 LE = 1
-10      2     flags            u16 LE = 0 (reserved)
-12      16    key_id           must equal the key file's key_id
-28      24    fek_nonce
-52      48    fek_wrapped      XChaCha20-Poly1305(MK, fek_nonce, FEK[32]) + tag
-                               AAD = bytes 0..28
-100           end
+10      2     flags            u16 LE = 0 (reserved; non-zero is rejected)
+12      16    vault_id         random; never changes, including on rekey
+28      16    key_id           must equal the key file's key_id
+44      24    fek_nonce
+68      48    fek_wrapped      XChaCha20-Poly1305(MK, fek_nonce, FEK[32]) + tag
+                               AAD = bytes 0..44
+116           end
 ```
 
-**Entry streams.** Each entry is zstd-compressed, then encrypted with FEK in fixed 1 MiB chunks using the STREAM construction (chunk counter and a last-chunk flag are bound into each chunk's nonce). This detects reordered, duplicated, dropped, or truncated chunks. Each entry gets its own random nonce prefix.
+`vault_id` exists so that index and entry data can be bound to *this* vault (via AAD) without being bound to `key_id`, which changes on rekey.
 
-**Index block.** A serialized list of entries, encrypted with FEK and a fresh random nonce every time it is written. AAD = vault header. Per entry:
+**Entry streams.** Each entry is zstd-compressed (level 6), then encrypted with FEK in fixed 1 MiB chunks using the STREAM construction (`EncryptorBE32`: chunk counter and a last-chunk flag are bound into each chunk's nonce). This detects reordered, duplicated, dropped, or truncated chunks. Each entry gets its own random 19-byte nonce prefix, recorded in the index, so swapping two entries' data is also detected. AAD = header bytes 0..28 ‖ `"SV-ENTRY"`.
 
-- normalized relative path (UTF-8)
+Ciphertext length of an entry is `compressed_size + 16 × max(1, ⌈compressed_size / 1 MiB⌉)`; the decoder rejects any index entry that does not match.
+
+**Index block.** `nonce[24] ‖ XChaCha20-Poly1305(FEK, nonce, index)`, AAD = header bytes 0..28 ‖ `"SV-INDEX"`. A fresh random nonce is used every time the index is written. Per entry:
+
+- normalized relative path (UTF-8, validated per §7.1, unique case-insensitively)
 - original size, compressed size, modification time
 - offset and length of its stream, nonce prefix, chunk size
 
-File names, folder structure, and per-file sizes are therefore hidden. The **total vault size** and the **number of index rewrites** are visible; we accept this leak in v1.
+File names, folder structure, and per-file sizes are therefore hidden. The **total vault size** is visible; we accept this leak in v1.
 
-**Trailer.** `index_offset` (u64) + `index_length` (u64) + magic `"SVEND\0\0\1"`. Authenticity of the index comes from its AEAD tag, not the trailer.
+**Trailer.** `index_offset` (u64) + `index_length` (u64) + magic `"SVEND\0\0\1"`. The index must end exactly where the trailer starts. Authenticity of the index comes from its AEAD tag, not the trailer.
 
-**Append / replace.** New entries are written after the current index; a new index is written after them; the trailer is rewritten. Old index blocks and replaced entries become dead space. A **Compact** command rewrites the vault without dead space.
+**Add / replace / remove.** Every change writes a complete new vault: header, the kept entries copied verbatim as ciphertext (not re-encrypted), new entries, a new index, a new trailer. There is no dead space and no old index left in the file, so an attacker with write access cannot roll the file list back to an earlier version stored in the same file. Cost: each change rewrites the whole file (I/O only). No separate Compact command is needed.
 
-**Crash safety.** Writes go to `<name>.svault.tmp`, are flushed, then atomically renamed over the original. A crash leaves the previous vault intact.
+**Crash safety.** Writes go to `<name>.svault.tmp`, are synced, then renamed over the original. A crash leaves the previous vault intact. A leftover `.tmp` file contains only ciphertext.
+
+**Limitations of format v1.**
+- An attacker who can replace the whole file can substitute an *older copy of the same vault* (e.g., from a backup). Detecting this would require state outside the file.
+- Empty folders are not stored.
+- If extraction fails part-way (e.g., tampering detected in the third file), the failing file is deleted but files already extracted remain. They are authentic, because every chunk is authenticated before it is written.
 
 ### 4.5 Password change vs. rekey
 
 These are different operations, and the UI must not blur them.
 
 - **Change password.** Decrypt MK with the old KEK, re-encrypt it with a new KEK (new salt). Only the key file changes; takes seconds. **Limitation:** any *old copy* of the key file still opens with the *old* password. If the old password may be compromised, password change alone is not enough.
-- **Rekey (compromise response).** Generate a new MK and `key_id`, then rewrite the `fek_wrapped` field of every selected vault. Only headers change; vault data is not re-encrypted, so this is still fast. Old key file copies become useless for rekeyed vaults. The user must then destroy old key file copies and back up the new one.
+- **Rekey (compromise response).** Generate a new MK and `key_id`, write the new key file first, then rewrite `key_id`, `fek_nonce` and `fek_wrapped` of every selected vault. Each vault is fully verified (index decrypted) before its header is replaced. Only headers change; vault data is not re-encrypted, so this is still fast. Old key file copies become useless for rekeyed vaults. The user must then destroy old key file copies and back up the new one.
+- **Limitation:** rekey does not change the FEK. Someone who already extracted a vault's FEK (which requires the old key file *and* old password) and keeps a copy of the vault can still read that copy. Rekey protects against future use of a leaked key, not against data already taken.
 
 ### 4.6 What we deliberately do not do
 
@@ -216,7 +228,7 @@ Based on NIST SP 800-63B Rev. 4.
 - Minimum **15 characters**. Maximum 256.
 - **No composition rules** (no forced uppercase / digit / symbol).
 - All Unicode accepted, including spaces; normalized with NFC before hashing.
-- Rejected if found in a **bundled offline list of common and breached passwords** (no network lookup). Target list size ≤ 5 MB compressed; exact source and size decided in M1.
+- Rejected if found in a **bundled offline list of common and breached passwords** (no network lookup). Target list size ≤ 5 MB compressed. **M1 status:** only a small built-in list plus repetition checks; the full list is still open (§12, question 4).
 - A strength meter and a passphrase generator (random words) are provided.
 
 ---
@@ -258,7 +270,9 @@ On extraction, every entry path is normalized and rejected if it:
 - **Create key file** → password → save → backup ×2 → verify.
 - **Create vault** → drag files/folders in → select key file → password → save `.svault`.
 - **Open vault** → select key file → password → file list → extract all / extract selected / add / replace / remove.
-- **Change password**, **Rekey**, **Verify backup**, **Compact**.
+- **Change password**, **Rekey**, **Verify backup**.
+
+The M1 CLI implements all of these as commands (`keygen`, `create`, `list`, `extract`, `add`, `remove`, `passwd`, `rekey`, `verify-key`, `info`). The CLI cannot enforce the two-copy backup step; it prints instructions instead. The GUI (M2) will enforce it.
 
 ### 8.3 Portability
 
@@ -269,7 +283,7 @@ On extraction, every entry path is normalized and rejected if it:
 
 ## 9. Distribution and trust
 
-- Source code public under an OSI-approved license (to be decided).
+- Source code licensed under **MIT OR Apache-2.0** (the Rust ecosystem convention; Apache-2.0 adds an explicit patent grant).
 - Release binaries **code-signed**; SHA-256 checksums published with each release.
 - Reproducible builds are a goal for v1.x so others can verify the binary matches the source.
 - The app performs a self-integrity check at startup and warns if its signature is missing or invalid.
@@ -286,16 +300,18 @@ On extraction, every entry path is normalized and rejected if it:
 - **Path-traversal suite** for §7.1.
 - **Crash tests**: kill the process mid-write; the previous vault must still open.
 
+M1 status: round-trip, every-byte-flip, every-truncation, entry-swap, key-mismatch, rekey, password-change, overwrite-refusal, symlink and path-rule tests are in `crates/vault-core/tests/` and run in CI on Windows and Linux. Not yet done: published test vectors, `cargo-fuzz` targets (only a basic random-input test for the index decoder exists), kill-mid-write crash tests.
+
 ---
 
 ## 11. Milestones
 
 | Milestone | Deliverable |
 |---|---|
-| **M0** | This design reviewed and frozen as format v1 |
-| **M1** | `vault-core` + CLI: key file, vault create/list/extract, tests, KDF calibration |
-| **M2** | GUI for the main flows (§8.2) |
-| **M3** | Append/replace/compact, rekey, backup verification, storage warnings |
+| **M0** | This design reviewed and frozen as format v1 — *done* |
+| **M1** | `vault-core` + CLI: key file, vault create/list/extract/add/remove, rekey, storage warnings, tests, KDF calibration — *done* |
+| **M2** | GUI for the main flows (§8.2), including enforced backup flow |
+| **M3** | Test vectors, fuzzing, crash tests, full breached-password list |
 | **M4** | Code signing, release pipeline, checksums |
 | **M5** | External security audit → v1.0 |
 
@@ -303,8 +319,8 @@ On extraction, every entry path is normalized and rejected if it:
 
 ## 12. Open questions
 
-1. **License:** GPLv3 vs. Apache-2.0 / MIT dual license.
-2. **Crypto library:** RustCrypto crates (`chacha20poly1305`, `argon2`) vs. libsodium bindings. Decide by maintenance status and audit history, verified at M1 start.
+1. ~~License~~ — decided: MIT OR Apache-2.0.
+2. **Crypto library:** M1 uses the RustCrypto crates (`chacha20poly1305` 0.10, `argon2` 0.5) — pure Rust, no C toolchain needed. Their audit history must be checked and recorded here before v1.0; switching to libsodium remains possible because the file format does not depend on the library.
 3. **GUI toolkit:** egui vs. Slint (§8.1).
 4. **Breached-password list:** source, licensing, and size (§6).
 5. **Hiding total vault size:** optional padding to size buckets — worth the overhead?
@@ -318,6 +334,6 @@ On extraction, every entry path is normalized and rejected if it:
 |---|---|---|
 | Factors | Key file + password, always | Password, optional key file |
 | Password change | Re-encrypts key file only | Re-encrypts every archive |
-| Compromise response | Rekey rewrites headers only | Re-encrypt everything |
+| Compromise response | Rekey rewrites headers only (see §4.5 limitation) | Re-encrypt everything |
 | Archive operations | List / extract one / add / replace without full decrypt | Often decrypt whole volume |
 | Weak password | Rejected | Allowed |

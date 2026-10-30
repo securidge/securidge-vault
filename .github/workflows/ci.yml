@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --locked
+
+  build-windows:
+    name: Build Windows binary
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: cargo build --release --locked -p vault-cli
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash target/release/securidge-vault.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  securidge-vault.exe" | Out-File -Encoding ascii target/release/securidge-vault.exe.sha256
+          Get-Content target/release/securidge-vault.exe.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: securidge-vault-windows-x64-unsigned
+          path: |
+            target/release/securidge-vault.exe
+            target/release/securidge-vault.exe.sha256

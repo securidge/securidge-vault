@@ -1,0 +1,20 @@
+[package]
+name = "vault-cli"
+description = "Command-line interface for Securidge Vault"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "securidge-vault"
+path = "src/main.rs"
+
+[dependencies]
+vault-core = { path = "../vault-core" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+zeroize = "1"

@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["crates/vault-core", "crates/vault-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/securidge/securidge-vault"
+authors = ["Securidge"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Argon2 is unusably slow without optimisation, even in tests.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

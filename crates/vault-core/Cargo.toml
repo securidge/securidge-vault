@@ -1,0 +1,21 @@
+[package]
+name = "vault-core"
+description = "Core library for Securidge Vault: key files, vault format, and cryptography"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+chacha20poly1305 = { version = "0.10", features = ["stream"] }
+getrandom = "0.2"
+thiserror = "1"
+unicode-normalization = "0.1"
+zeroize = { version = "1", features = ["derive"] }
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
