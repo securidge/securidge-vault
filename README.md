@@ -4,6 +4,12 @@
 
 > ⚠️ **Status: pre-alpha.** Desktop app and command line work; no official release yet, and the software has **not** been independently audited. Do not use it for data you cannot afford to lose.
 
+## Download
+
+**[⬇️ Download for Windows](https://github.com/securidge/securidge-vault/releases/latest/download/SecuridgeVault-windows-x64.zip)** · [How to run and verify](download/README.md) · [한국어 안내](download/README.md#한국어-안내)
+
+The interface is in English by default; choose **Language / 언어 → 한국어** at the top right for Korean.
+
 ## What it does
 
 - Compresses files into an encrypted vault (`.svault`).

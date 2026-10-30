@@ -16,7 +16,9 @@ pre-release, and a maintainer reviews and publishes it.
    [build provenance](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations)
    and creates a draft release.
 5. Download the zip from the draft, check it on a clean Windows machine,
-   then publish the draft.
+   then publish the draft (not as a pre-release, so that the
+   `releases/latest/download/SecuridgeVault-windows-x64.zip` link in
+   `download/README.md` and the main README points at it).
 
 **Dry run:** Actions → Release → *Run workflow* with the tag left empty
 builds, signs-if-configured and packages the current commit and uploads it
@@ -25,7 +27,7 @@ as a workflow artifact. It creates no tag, release or attestation.
 Users verify a download with:
 
 ```text
-gh attestation verify securidge-vault-v0.2.0-windows-x64.zip -R securidge/securidge-vault
+gh attestation verify SecuridgeVault-windows-x64.zip -R securidge/securidge-vault
 ```
 
 ## Code signing (not set up yet)

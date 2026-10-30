@@ -130,7 +130,9 @@ jobs:
           New-Item -ItemType Directory $out | Out-Null
           Copy-Item signed\SecuridgeVault.exe, signed\securidge-vault.exe $out
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, SECURITY.md $out
-          $zip = "securidge-vault-$env:TAG-windows-x64.zip"
+          # Fixed name, so .../releases/latest/download/<name> always points
+          # at the newest release (download/README.md links to it).
+          $zip = "SecuridgeVault-windows-x64.zip"
           Compress-Archive -Path "$out\*" -DestinationPath $zip
           $lines = foreach ($f in "$out\SecuridgeVault.exe", "$out\securidge-vault.exe", $zip) {
             "$((Get-FileHash $f -Algorithm SHA256).Hash.ToLower())  $(Split-Path $f -Leaf)"
@@ -144,7 +146,7 @@ jobs:
         with:
           name: release-dry-run
           path: |
-            securidge-vault-*-windows-x64.zip
+            SecuridgeVault-windows-x64.zip
             SHA256SUMS.txt
 
       - name: Build provenance
@@ -154,7 +156,7 @@ jobs:
           subject-path: |
             dist/SecuridgeVault.exe
             dist/securidge-vault.exe
-            securidge-vault-*-windows-x64.zip
+            SecuridgeVault-windows-x64.zip
 
       - name: Draft release
         if: env.DRY_RUN != 'true'
@@ -164,7 +166,10 @@ jobs:
           SIGNED: ${{ steps.sign.outputs.signed }}
         run: |
           {
-            echo "> **Pre-release, not independently audited.** Do not use it for data you cannot afford to lose."
+            echo "> **Pre-alpha, not independently audited.** Do not use it for data you cannot afford to lose."
+            echo "> **시험판(프리알파)이며 외부 보안 감사를 받지 않았습니다.** 잃으면 안 되는 데이터에는 쓰지 마세요."
+            echo
+            echo "Download \`SecuridgeVault-windows-x64.zip\`, unzip, run \`SecuridgeVault.exe\`. No installer. Korean UI: top-right menu \"Language / 언어\"."
             echo
             if [ "$SIGNED" = "true" ]; then
               echo "Binaries are Authenticode-signed."
@@ -174,7 +179,7 @@ jobs:
             echo
             echo "Verify the download:"
             echo '```'
-            echo "gh attestation verify securidge-vault-$TAG-windows-x64.zip -R ${{ github.repository }}"
+            echo "gh attestation verify SecuridgeVault-windows-x64.zip -R ${{ github.repository }}"
             echo '```'
             echo
             echo "SHA-256:"
@@ -182,6 +187,8 @@ jobs:
             cat SHA256SUMS.txt
             echo '```'
           } > notes.md
-          gh release create "$TAG" --draft --prerelease --verify-tag \
+          # Not marked "pre-release": GitHub's "latest" link skips those. The
+          # 0.x version and the notes above say it is not production-ready.
+          gh release create "$TAG" --draft --verify-tag \
             --title "Securidge Vault $TAG" --notes-file notes.md \
-            "securidge-vault-$TAG-windows-x64.zip" SHA256SUMS.txt
+            SecuridgeVault-windows-x64.zip SHA256SUMS.txt
