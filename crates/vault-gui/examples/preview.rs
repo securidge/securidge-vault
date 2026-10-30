@@ -1,7 +1,7 @@
 //! Developer preview: opens the window on a chosen screen with throwaway
 //! data, for checking layout. Not part of the shipped app.
 //!
-//! cargo run -p vault-gui --example preview -- opened|backup|create
+//! cargo run -p vault-gui --example preview -- home|newkey|create|opened|backup|rekey [ko]
 
 use eframe::egui;
 use vault_core::{keyfile, KdfLimits, KdfParams, Password, Vault};
@@ -15,10 +15,14 @@ const CFG: Config = Config {
         t: 1,
         p: 1,
     },
+    save_settings: false,
 };
 
 fn main() -> eframe::Result {
     let which = std::env::args().nth(1).unwrap_or_else(|| "opened".into());
+    if std::env::args().nth(2).as_deref() == Some("ko") {
+        vault_gui::i18n::set_lang(vault_gui::i18n::Lang::Ko);
+    }
     let dir = std::env::temp_dir().join(format!("svault-preview-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("photos/2026")).unwrap();
     for (n, s) in [
@@ -38,6 +42,9 @@ fn main() -> eframe::Result {
             b.write_copy(0, dir.join("usb1/me.svkey"));
             Screen::Backup(b)
         }
+        "home" => Screen::Home,
+        "newkey" => Screen::NewKey(Default::default()),
+        "rekey" => Screen::Rekey(Default::default()),
         "create" => {
             let mut c = CreateVault::default();
             c.inputs.push(dir.join("photos"));

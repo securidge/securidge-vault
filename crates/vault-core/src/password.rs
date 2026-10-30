@@ -41,29 +41,60 @@ impl Password {
     }
 }
 
-fn check_policy(pw: &str) -> Result<()> {
+/// Why a new password was rejected. Lets user interfaces explain it in
+/// their own words and language.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Weakness {
+    /// Fewer than [`MIN_CHARS`] characters; carries the actual count.
+    TooShort(usize),
+    /// More than [`MAX_CHARS`] characters.
+    TooLong,
+    /// Fewer than five different characters.
+    Repetitive,
+    /// Found in the breached-password list or a known common pattern.
+    Common,
+}
+
+impl std::fmt::Display for Weakness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Weakness::TooShort(n) => write!(
+                f,
+                "use at least {MIN_CHARS} characters (yours has {n}); a few random words work well"
+            ),
+            Weakness::TooLong => write!(f, "use at most {MAX_CHARS} characters"),
+            Weakness::Repetitive => f.write_str("too repetitive"),
+            Weakness::Common => f.write_str("it appears in lists of breached or common passwords"),
+        }
+    }
+}
+
+/// Checks a candidate **new** password against the policy (after NFC).
+pub fn weakness(raw: &str) -> Option<Weakness> {
+    let pw: String = raw.nfc().collect();
     let chars = pw.chars().count();
     if chars < MIN_CHARS {
-        return Err(Error::WeakPassword(format!(
-            "use at least {MIN_CHARS} characters (yours has {chars}); a few random words work well"
-        )));
+        return Some(Weakness::TooShort(chars));
     }
     if chars > MAX_CHARS {
-        return Err(Error::WeakPassword(format!(
-            "use at most {MAX_CHARS} characters"
-        )));
+        return Some(Weakness::TooLong);
     }
     let distinct: HashSet<char> = pw.chars().collect();
     if distinct.len() < 5 {
-        return Err(Error::WeakPassword("too repetitive".into()));
+        return Some(Weakness::Repetitive);
     }
     let lower = pw.to_lowercase();
     if COMMON.iter().any(|c| *c == lower) || is_repeated_common(&lower) || is_breached(&lower) {
-        return Err(Error::WeakPassword(
-            "it appears in lists of breached or common passwords".into(),
-        ));
+        return Some(Weakness::Common);
     }
-    Ok(())
+    None
+}
+
+fn check_policy(pw: &str) -> Result<()> {
+    match weakness(pw) {
+        Some(w) => Err(Error::WeakPassword(w.to_string())),
+        None => Ok(()),
+    }
 }
 
 /// Breached passwords of 15+ characters, sorted by bytes (one per line).

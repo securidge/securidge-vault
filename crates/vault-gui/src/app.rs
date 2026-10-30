@@ -13,6 +13,8 @@ use eframe::egui::{self, Color32, RichText};
 use egui_extras::{Column, TableBuilder};
 use vault_core::advice;
 use vault_core::keyfile;
+
+use crate::i18n::{self, err, t, tf, Lang};
 use vault_core::{vault, KdfLimits, KdfParams, KeyId, Password, UnlockedKey, Vault};
 use zeroize::Zeroizing;
 
@@ -21,19 +23,22 @@ use zeroize::Zeroizing;
 pub struct Config {
     pub limits: KdfLimits,
     pub params: KdfParams,
+    /// Remember the chosen language in settings.toml (off in tests).
+    pub save_settings: bool,
 }
 
 impl Config {
     pub const PRODUCTION: Config = Config {
         limits: KdfLimits::PRODUCTION,
         params: KdfParams::DEFAULT,
+        save_settings: true,
     };
 }
 
 type Apply = Box<dyn FnOnce(&mut App) + Send>;
 
 struct Job {
-    label: String,
+    label: &'static str,
     started: Instant,
     rx: mpsc::Receiver<Apply>,
 }
@@ -64,7 +69,7 @@ pub struct Runtime {
 
 impl Runtime {
     /// Runs `work` on a worker thread; its result is applied on the UI thread.
-    fn spawn(&mut self, label: &str, work: impl FnOnce() -> Apply + Send + 'static) {
+    fn spawn(&mut self, label: &'static str, work: impl FnOnce() -> Apply + Send + 'static) {
         let (tx, rx) = mpsc::channel();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
@@ -74,7 +79,7 @@ impl Runtime {
         });
         self.notice = None;
         self.job = Some(Job {
-            label: label.to_owned(),
+            label,
             started: Instant::now(),
             rx,
         });
@@ -186,7 +191,7 @@ impl App {
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.rt.job = None;
-                fail(self, "The operation stopped unexpectedly.");
+                fail(self, t("The operation stopped unexpectedly."));
             }
         }
     }
@@ -255,7 +260,7 @@ impl eframe::App for App {
             if self.busy() {
                 ui.ctx()
                     .send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                info(self, "Please wait until the current operation finishes.");
+                info(self, t("Please wait until the current operation finishes."));
             } else if self.backup_pending() && !self.rt.close_warned {
                 // DESIGN.md §5.1: the backup step is never skipped silently.
                 ui.ctx()
@@ -263,7 +268,7 @@ impl eframe::App for App {
                 self.rt.close_warned = true;
                 fail(
                     self,
-                    "Your key file has no verified backups yet. Finish the backups, or close again to quit anyway.",
+                    t("Your key file has no verified backups yet. Finish the backups, or close again to quit anyway."),
                 );
             }
         }
@@ -276,24 +281,48 @@ impl eframe::App for App {
                 let home = !matches!(self.screen, Screen::Home) && !self.backup_pending();
                 if home
                     && ui
-                        .add_enabled(!self.busy(), egui::Button::new("⬅ Home"))
+                        .add_enabled(!self.busy(), egui::Button::new(format!("⬅ {}", t("Home"))))
                         .clicked()
                 {
                     self.rt.go(Screen::Home);
                 }
                 ui.label(RichText::new("Securidge Vault").strong().size(18.0));
                 ui.label(
-                    RichText::new(concat!("v", env!("CARGO_PKG_VERSION"), " · pre-alpha")).weak(),
+                    RichText::new(format!(
+                        "v{} · {}",
+                        env!("CARGO_PKG_VERSION"),
+                        t("pre-alpha")
+                    ))
+                    .weak(),
                 );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let mut cur = i18n::lang();
+                    // Shown in both languages so either reader can find it.
+                    egui::ComboBox::from_label("🌐 Language / 언어")
+                        .selected_text(cur.native_name())
+                        .show_ui(ui, |ui| {
+                            for l in Lang::ALL {
+                                ui.selectable_value(&mut cur, l, l.native_name());
+                            }
+                        });
+                    if cur != i18n::lang() {
+                        i18n::set_lang(cur);
+                        if self.rt.cfg.save_settings {
+                            crate::settings::save_lang(cur);
+                        }
+                    }
+                });
             });
             ui.add_space(4.0);
             if let Some(job) = &self.rt.job {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label(format!(
-                        "{}… {:.0}s",
-                        job.label,
-                        job.started.elapsed().as_secs_f32()
+                    ui.label(tf(
+                        "{0}… {1}s",
+                        &[
+                            &t(job.label),
+                            &format!("{:.0}", job.started.elapsed().as_secs_f32()),
+                        ],
                     ));
                 });
                 ui.ctx()
@@ -307,7 +336,7 @@ impl eframe::App for App {
                 };
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(&n.text).color(color));
-                    if ui.small_button("×").on_hover_text("Dismiss").clicked() {
+                    if ui.small_button("×").on_hover_text(t("Dismiss")).clicked() {
                         self.rt.notice = None;
                     }
                 });
@@ -417,21 +446,25 @@ fn new_password_fields(
     first: &mut Zeroizing<String>,
     second: &mut Zeroizing<String>,
 ) -> Option<Password> {
-    password_field(ui, "New password", first);
-    password_field(ui, "Repeat password", second);
+    password_field(ui, t("New password"), first);
+    password_field(ui, t("Repeat password"), second);
     if first.is_empty() {
-        ui.label(RichText::new("At least 15 characters. A few random words work well.").weak());
+        ui.label(RichText::new(t("At least 15 characters. A few random words work well.")).weak());
+        return None;
+    }
+    if let Some(w) = vault_core::password::weakness(first) {
+        error_text(ui, &i18n::weakness(w));
         return None;
     }
     match Password::new_checked(first) {
         Err(e) => {
-            error_text(ui, &e.to_string());
+            error_text(ui, &err(&e));
             None
         }
         Ok(p) if **first == **second => Some(p),
         Ok(_) => {
             if !second.is_empty() {
-                error_text(ui, "The passwords do not match.");
+                error_text(ui, t("The passwords do not match."));
             }
             None
         }
@@ -450,18 +483,18 @@ fn pick(kind: Pick, default_name: &str) -> Option<PathBuf> {
     let d = rfd::FileDialog::new();
     match kind {
         Pick::OpenKey => d
-            .add_filter("Securidge key file", &[keyfile::EXTENSION])
+            .add_filter(t("Securidge key file"), &[keyfile::EXTENSION])
             .pick_file(),
         Pick::SaveKey => d
-            .add_filter("Securidge key file", &[keyfile::EXTENSION])
+            .add_filter(t("Securidge key file"), &[keyfile::EXTENSION])
             .set_file_name(default_name)
             .save_file()
             .map(|p| with_ext(p, keyfile::EXTENSION)),
         Pick::OpenVault => d
-            .add_filter("Securidge vault", &[vault::EXTENSION])
+            .add_filter(t("Securidge vault"), &[vault::EXTENSION])
             .pick_file(),
         Pick::SaveVault => d
-            .add_filter("Securidge vault", &[vault::EXTENSION])
+            .add_filter(t("Securidge vault"), &[vault::EXTENSION])
             .set_file_name(default_name)
             .save_file()
             .map(|p| with_ext(p, vault::EXTENSION)),
@@ -479,12 +512,12 @@ fn path_row(
     let mut chosen = None;
     ui.horizontal(|ui| {
         ui.add_sized([150.0, 20.0], egui::Label::new(label));
-        if ui.button("Browse…").clicked() {
+        if ui.button(t("Browse…")).clicked() {
             chosen = pick(kind, default_name);
         }
         match path {
             Some(p) => ui.label(RichText::new(p.display().to_string()).monospace()),
-            None => ui.label(RichText::new("not chosen").weak()),
+            None => ui.label(RichText::new(t("not chosen")).weak()),
         };
     });
     chosen
@@ -499,11 +532,11 @@ pub struct KeyPick {
 
 impl KeyPick {
     pub fn set(&mut self, p: PathBuf) {
-        self.id = Some(std::fs::read(&p).map_err(|e| e.to_string()).and_then(|b| {
-            keyfile::inspect(&b)
-                .map(|(id, _)| id)
-                .map_err(|e| e.to_string())
-        }));
+        self.id = Some(
+            std::fs::read(&p)
+                .map_err(|e| err(&e.into()))
+                .and_then(|b| keyfile::inspect(&b).map(|(id, _)| id).map_err(|e| err(&e))),
+        );
         self.path = Some(p);
     }
 
@@ -517,10 +550,10 @@ impl KeyPick {
         }
         match &self.id {
             Some(Ok(id)) => {
-                ui.label(RichText::new(format!("Key id {id}")).weak());
+                ui.label(RichText::new(tf("Key id {0}", &[&id])).weak());
                 if let Some(p) = &self.path {
                     for w in advice::key_location(p, vault) {
-                        warn_text(ui, w.message());
+                        warn_text(ui, i18n::key_warning(w));
                     }
                 }
             }
@@ -539,7 +572,7 @@ pub struct VaultPick {
 
 impl VaultPick {
     pub fn set(&mut self, p: PathBuf) {
-        self.needs = Some(Vault::peek_key_id(&p).map_err(|e| e.to_string()));
+        self.needs = Some(Vault::peek_key_id(&p).map_err(|e| err(&e)));
         self.path = Some(p);
     }
 
@@ -548,12 +581,12 @@ impl VaultPick {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui) {
-        if let Some(p) = path_row(ui, "Vault", &self.path, Pick::OpenVault, "") {
+        if let Some(p) = path_row(ui, t("Vault"), &self.path, Pick::OpenVault, "") {
             self.set(p);
         }
         match &self.needs {
             Some(Ok(id)) => {
-                ui.label(RichText::new(format!("Needs the key file with key id {id}")).weak());
+                ui.label(RichText::new(tf("Needs the key file with key id {0}", &[&id])).weak());
             }
             Some(Err(e)) => error_text(ui, e),
             None => {}
@@ -565,10 +598,7 @@ impl VaultPick {
 
 fn home_ui(ui: &mut egui::Ui, rt: &mut Runtime) {
     ui.add_space(12.0);
-    ui.label(
-        "Encrypted archives that open only with both your key file and your password. \
-         There is no recovery: lose either one and the data is gone.",
-    );
+    ui.label(t("Encrypted archives that open only with both your key file and your password. There is no recovery: lose either one and the data is gone."));
     ui.add_space(12.0);
 
     let big = |ui: &mut egui::Ui, title: &str, sub: &str| -> bool {
@@ -585,39 +615,47 @@ fn home_ui(ui: &mut egui::Ui, rt: &mut Runtime) {
 
     ui.columns(2, |cols| {
         let ui = &mut cols[0];
-        section(ui, "Vaults");
-        if big(ui, "Open a vault", "List, extract, add or remove files.") {
+        section(ui, t("Vaults"));
+        if big(
+            ui,
+            t("Open a vault"),
+            t("List, extract, add or remove files."),
+        ) {
             rt.go(Screen::OpenVault(OpenVault::default()));
         }
         if big(
             ui,
-            "Create a vault",
-            "Pack files and folders into a new .svault.",
+            t("Create a vault"),
+            t("Pack files and folders into a new .svault."),
         ) {
             rt.go(Screen::CreateVault(CreateVault::default()));
         }
-        ui.label(RichText::new("Tip: drop files or a .svault here.").weak());
+        ui.label(RichText::new(t("Tip: drop files or a .svault here.")).weak());
 
         let ui = &mut cols[1];
-        section(ui, "Key files");
+        section(ui, t("Key files"));
         if big(
             ui,
-            "Create a key file",
-            "Start here. Includes making two backups.",
+            t("Create a key file"),
+            t("Start here. Includes making two backups."),
         ) {
             rt.go(Screen::NewKey(NewKey::default()));
         }
         if big(
             ui,
-            "Verify a backup",
-            "Check that a key file copy still opens.",
+            t("Verify a backup"),
+            t("Check that a key file copy still opens."),
         ) {
             rt.go(Screen::Verify(Verify::default()));
         }
-        if big(ui, "Change password", "Same key, new password.") {
+        if big(ui, t("Change password"), t("Same key, new password.")) {
             rt.go(Screen::Passwd(Passwd::default()));
         }
-        if big(ui, "Rekey vaults", "Move vaults to a brand-new key file.") {
+        if big(
+            ui,
+            t("Rekey vaults"),
+            t("Move vaults to a brand-new key file."),
+        ) {
             rt.go(Screen::Rekey(Rekey::default()));
         }
     });
@@ -625,7 +663,7 @@ fn home_ui(ui: &mut egui::Ui, rt: &mut Runtime) {
     ui.add_space(16.0);
     warn_text(
         ui,
-        "Pre-alpha software, not independently audited. Keep other copies of anything you cannot afford to lose.",
+        t("Pre-alpha software, not independently audited. Keep other copies of anything you cannot afford to lose."),
     );
 }
 
@@ -640,14 +678,14 @@ pub struct NewKey {
 
 impl NewKey {
     fn ui(&mut self, ui: &mut egui::Ui, rt: &mut Runtime) {
-        ui.heading("Create a key file");
-        ui.label("Step 1 of 3: choose a password and where to save the key file. Steps 2 and 3 make and check two backups.");
-        section(ui, "Password");
+        ui.heading(t("Create a key file"));
+        ui.label(t("Step 1 of 3: choose a password and where to save the key file. Steps 2 and 3 make and check two backups."));
+        section(ui, t("Password"));
         let pw = new_password_fields(ui, &mut self.pw1, &mut self.pw2);
-        section(ui, "Location");
+        section(ui, t("Location"));
         if let Some(p) = path_row(
             ui,
-            "Save key file to",
+            t("Save key file to"),
             &self.out,
             Pick::SaveKey,
             "my-key.svkey",
@@ -658,14 +696,14 @@ impl NewKey {
         if let Some(p) = &self.out {
             exists = p.exists();
             if exists {
-                error_text(ui, "That file already exists. Choose a new name.");
+                error_text(ui, t("That file already exists. Choose a new name."));
             }
             for w in advice::key_location(p, None) {
-                warn_text(ui, w.message());
+                warn_text(ui, i18n::key_warning(w));
             }
         }
         let ready = pw.is_some() && self.out.is_some() && !exists;
-        if primary_button(ui, ready, "Create key file") {
+        if primary_button(ui, ready, t("Create key file")) {
             let (Some(pw), Some(out)) = (pw, self.out.clone()) else {
                 return;
             };
@@ -679,14 +717,14 @@ impl NewKey {
                     Ok((id, bytes)) => {
                         ok(
                             app,
-                            format!(
-                                "Created {} (key id {id}). Now make two backups.",
-                                out.display()
+                            tf(
+                                "Created {0} (key id {1}). Now make two backups.",
+                                &[&out.display(), &id],
                             ),
                         );
                         app.rt.go(Screen::Backup(Backup::new(out, bytes)));
                     }
-                    Err(e) => fail(app, format!("Could not create the key file: {e}")),
+                    Err(e) => fail(app, tf("Could not create the key file: {0}", &[&err(&e)])),
                 })
             });
         }
@@ -731,14 +769,14 @@ impl Backup {
         );
         for o in &others {
             if folder(o) == folder(p) {
-                return Err(format!(
-                    "{} is in the same folder as another copy. Use a different drive or folder.",
-                    p.display()
+                return Err(tf(
+                    "{0} is in the same folder as another copy. Use a different drive or folder.",
+                    &[&p.display()],
                 ));
             }
         }
         if p.exists() {
-            return Err(format!("{} already exists.", p.display()));
+            return Err(tf("{0} already exists.", &[&p.display()]));
         }
         Ok(())
     }
@@ -748,7 +786,7 @@ impl Backup {
         self.copy_errors[slot] = None;
         let r = self
             .check_location(slot, &p)
-            .and_then(|()| keyfile::write_copy(&p, &self.bytes).map_err(|e| e.to_string()));
+            .and_then(|()| keyfile::write_copy(&p, &self.bytes).map_err(|e| err(&e)));
         match r {
             Ok(()) => self.copies[slot] = Some(p),
             Err(e) => self.copy_errors[slot] = Some(e),
@@ -756,32 +794,28 @@ impl Backup {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, rt: &mut Runtime) {
-        ui.heading("Back up your key file");
+        ui.heading(t("Back up your key file"));
         if self.verified {
-            ui.label(RichText::new("✔ All copies verified.").strong());
-            ui.label(format!("Original: {}", self.primary.display()));
+            ui.label(RichText::new(format!("✔ {}", t("All copies verified."))).strong());
+            ui.label(tf("Original: {0}", &[&self.primary.display()]));
             for c in self.copies.iter().flatten() {
-                ui.label(format!("Backup: {}", c.display()));
+                ui.label(tf("Backup: {0}", &[&c.display()]));
             }
             ui.add_space(6.0);
-            ui.label("Keep the copies in separate places. Verify a backup now and then (Home > Verify a backup).");
-            if primary_button(ui, true, "Done") {
+            ui.label(t("Keep the copies in separate places. Verify a backup now and then (Home > Verify a backup)."));
+            if primary_button(ui, true, t("Done")) {
                 rt.go(Screen::Home);
             }
             return;
         }
 
-        ui.label(
-            "There is no recovery. If you lose every copy of this key file, or forget the password, \
-             every vault made with it is lost for good. Save two backups now, ideally on two \
-             different USB drives.",
-        );
-        ui.label(format!("Original: {}", self.primary.display()));
+        ui.label(t("There is no recovery. If you lose every copy of this key file, or forget the password, every vault made with it is lost for good. Save two backups now, ideally on two different USB drives."));
+        ui.label(tf("Original: {0}", &[&self.primary.display()]));
 
-        section(ui, "Step 2 of 3: two backup copies");
+        section(ui, t("Step 2 of 3: two backup copies"));
         let primary_vol = advice::volume(&self.primary);
         for slot in 0..2 {
-            let label = format!("Backup {}", slot + 1);
+            let label = tf("Backup {0}", &[&(slot + 1)]);
             match self.copies[slot].clone() {
                 Some(p) => {
                     ui.horizontal(|ui| {
@@ -789,7 +823,7 @@ impl Backup {
                         ui.label(format!("✔ {}", p.display()));
                     });
                     if primary_vol.is_some() && advice::volume(&p) == primary_vol {
-                        warn_text(ui, "Same drive as the original: if that drive fails, both copies are lost.");
+                        warn_text(ui, t("Same drive as the original: if that drive fails, both copies are lost."));
                     }
                 }
                 None => {
@@ -809,10 +843,10 @@ impl Backup {
         }
 
         let both = self.copies.iter().all(Option::is_some);
-        section(ui, "Step 3 of 3: check the copies");
-        ui.label("Type the password once more. This reads every copy back and confirms the password opens it.");
-        password_field(ui, "Password", &mut self.pw);
-        if primary_button(ui, both && !self.pw.is_empty(), "Verify all copies") {
+        section(ui, t("Step 3 of 3: check the copies"));
+        ui.label(t("Type the password once more. This reads every copy back and confirms the password opens it."));
+        password_field(ui, t("Password"), &mut self.pw);
+        if primary_button(ui, both && !self.pw.is_empty(), t("Verify all copies")) {
             let pw = Password::new_unchecked(&self.pw);
             self.pw = Zeroizing::default();
             let mut files = vec![self.primary.clone()];
@@ -828,7 +862,10 @@ impl Backup {
                         }
                         ok(
                             app,
-                            format!("All {} copies match and open (key id {id}).", files.len()),
+                            tf(
+                                "All {0} copies match and open (key id {1}).",
+                                &[&files.len(), &id],
+                            ),
                         );
                     }
                     Err(e) => fail(app, e),
@@ -840,17 +877,17 @@ impl Backup {
         ui.separator();
         ui.checkbox(
             &mut self.accept_risk,
-            "I accept that if I lose this key file or forget the password, my data is gone.",
+            t("I accept that if I lose this key file or forget the password, my data is gone."),
         );
         if ui
-            .add_enabled(self.accept_risk, egui::Button::new("Skip backups"))
+            .add_enabled(self.accept_risk, egui::Button::new(t("Skip backups")))
             .clicked()
         {
             info_nav(
                 rt,
-                format!(
-                    "Backups skipped. Only one copy exists: {}",
-                    self.primary.display()
+                tf(
+                    "Backups skipped. Only one copy exists: {0}",
+                    &[&self.primary.display()],
                 ),
             );
         }
@@ -874,17 +911,17 @@ pub fn verify_copies(
     limits: &KdfLimits,
 ) -> Result<KeyId, String> {
     for f in files {
-        let b = std::fs::read(f).map_err(|e| format!("Cannot read {}: {e}", f.display()))?;
+        let b = std::fs::read(f).map_err(|e| tf("Cannot read {0}: {1}", &[&f.display(), &e]))?;
         if b != expected {
-            return Err(format!(
-                "{} differs from the original key file.",
-                f.display()
+            return Err(tf(
+                "{0} differs from the original key file.",
+                &[&f.display()],
             ));
         }
     }
     keyfile::open(expected, pw, limits)
         .map(|k| k.key_id())
-        .map_err(|e| e.to_string())
+        .map_err(|e| err(&e))
 }
 
 // ----------------------------------------------------------- create vault --
@@ -899,20 +936,20 @@ pub struct CreateVault {
 
 impl CreateVault {
     fn ui(&mut self, ui: &mut egui::Ui, rt: &mut Runtime) {
-        ui.heading("Create a vault");
-        section(ui, "Files and folders");
+        ui.heading(t("Create a vault"));
+        section(ui, t("Files and folders"));
         ui.horizontal(|ui| {
-            if ui.button("Add files…").clicked() {
+            if ui.button(t("Add files…")).clicked() {
                 if let Some(ps) = rfd::FileDialog::new().pick_files() {
                     self.inputs.extend(ps);
                 }
             }
-            if ui.button("Add folder…").clicked() {
+            if ui.button(t("Add folder…")).clicked() {
                 if let Some(ps) = rfd::FileDialog::new().pick_folders() {
                     self.inputs.extend(ps);
                 }
             }
-            ui.label(RichText::new("or drop them on this window").weak());
+            ui.label(RichText::new(t("or drop them on this window")).weak());
         });
         self.inputs.sort();
         self.inputs.dedup();
@@ -921,7 +958,7 @@ impl CreateVault {
             ui.horizontal(|ui| {
                 if ui
                     .small_button("×")
-                    .on_hover_text("Remove from list")
+                    .on_hover_text(t("Remove from list"))
                     .clicked()
                 {
                     remove = Some(i);
@@ -934,10 +971,10 @@ impl CreateVault {
             self.inputs.remove(i);
         }
 
-        section(ui, "Save as");
+        section(ui, t("Save as"));
         if let Some(p) = path_row(
             ui,
-            "Vault file",
+            t("Vault file"),
             &self.out,
             Pick::SaveVault,
             "my-files.svault",
@@ -946,19 +983,19 @@ impl CreateVault {
         }
         let exists = self.out.as_ref().is_some_and(|p| p.exists());
         if exists {
-            error_text(ui, "That file already exists. Choose a new name.");
+            error_text(ui, t("That file already exists. Choose a new name."));
         }
 
-        section(ui, "Key");
-        self.key.ui(ui, "Key file", self.out.as_deref());
-        password_field(ui, "Password", &mut self.pw);
+        section(ui, t("Key"));
+        self.key.ui(ui, t("Key file"), self.out.as_deref());
+        password_field(ui, t("Password"), &mut self.pw);
 
         let ready = !self.inputs.is_empty()
             && self.out.is_some()
             && !exists
             && self.key.id().is_some()
             && !self.pw.is_empty();
-        if primary_button(ui, ready, "Create vault") {
+        if primary_button(ui, ready, t("Create vault")) {
             let pw = Password::new_unchecked(&self.pw);
             self.pw = Zeroizing::default();
             let key = self.key.path.clone().expect("checked");
@@ -970,21 +1007,20 @@ impl CreateVault {
                     .and_then(|k| Vault::create(&out, &k, &inputs));
                 Box::new(move |app: &mut App| match r {
                     Ok((v, skipped)) => {
-                        let mut msg = format!(
-                            "Created {} with {} file(s).",
-                            out.display(),
-                            v.entries().len()
+                        let mut msg = tf(
+                            "Created {0} with {1} file(s).",
+                            &[&out.display(), &v.entries().len()],
                         );
                         if !skipped.is_empty() {
-                            msg.push_str(&format!(
-                                " Skipped {} link(s) or special file(s).",
-                                skipped.len()
+                            msg.push_str(&tf(
+                                " Skipped {0} link(s) or special file(s).",
+                                &[&skipped.len()],
                             ));
                         }
                         ok(app, msg);
                         app.rt.go(Screen::Opened(Opened::new(v)));
                     }
-                    Err(e) => fail(app, e.to_string()),
+                    Err(e) => fail(app, err(&e)),
                 })
             });
         }
@@ -1002,21 +1038,21 @@ pub struct OpenVault {
 
 impl OpenVault {
     fn ui(&mut self, ui: &mut egui::Ui, rt: &mut Runtime) {
-        ui.heading("Open a vault");
-        section(ui, "Vault");
+        ui.heading(t("Open a vault"));
+        section(ui, t("Vault"));
         self.vault.ui(ui);
-        section(ui, "Key");
-        self.key.ui(ui, "Key file", self.vault.path.as_deref());
+        section(ui, t("Key"));
+        self.key.ui(ui, t("Key file"), self.vault.path.as_deref());
         let mismatch = matches!((self.vault.needs(), self.key.id()), (Some(a), Some(b)) if a != b);
         if mismatch {
-            error_text(ui, "This key file does not belong to this vault.");
+            error_text(ui, t("This key file does not belong to this vault."));
         }
-        password_field(ui, "Password", &mut self.pw);
+        password_field(ui, t("Password"), &mut self.pw);
         let ready = self.vault.needs().is_some()
             && self.key.id().is_some()
             && !mismatch
             && !self.pw.is_empty();
-        if primary_button(ui, ready, "Open") {
+        if primary_button(ui, ready, t("Open")) {
             let pw = Password::new_unchecked(&self.pw);
             self.pw = Zeroizing::default();
             let key = self.key.path.clone().expect("checked");
@@ -1026,7 +1062,7 @@ impl OpenVault {
                 let r = keyfile::open_file(&key, &pw, &limits).and_then(|k| Vault::open(&path, &k));
                 Box::new(move |app: &mut App| match r {
                     Ok(v) => app.rt.go(Screen::Opened(Opened::new(v))),
-                    Err(e) => fail(app, e.to_string()),
+                    Err(e) => fail(app, err(&e)),
                 })
             });
         }
@@ -1067,7 +1103,7 @@ impl Opened {
     fn run(
         &mut self,
         rt: &mut Runtime,
-        label: &str,
+        label: &'static str,
         op: impl FnOnce(&mut Vault) -> Result<String, String> + Send + 'static,
     ) {
         let Some(mut v) = self.vault.take() else {
@@ -1094,15 +1130,15 @@ impl Opened {
         let replace = self.replace;
         self.run(rt, "Adding", move |v| {
             let before = v.entries().len();
-            let skipped = v.add(&inputs, replace).map_err(|e| e.to_string())?;
-            let mut m = format!(
-                "Vault now holds {} file(s) (was {before}).",
-                v.entries().len()
+            let skipped = v.add(&inputs, replace).map_err(|e| err(&e))?;
+            let mut m = tf(
+                "Vault now holds {0} file(s) (was {1}).",
+                &[&v.entries().len(), &before],
             );
             if !skipped.is_empty() {
-                m.push_str(&format!(
-                    " Skipped {} link(s) or special file(s).",
-                    skipped.len()
+                m.push_str(&tf(
+                    " Skipped {0} link(s) or special file(s).",
+                    &[&skipped.len()],
                 ));
             }
             Ok(m)
@@ -1111,7 +1147,7 @@ impl Opened {
 
     fn extract(&mut self, rt: &mut Runtime, only: Vec<String>) {
         let Some(dest) = rfd::FileDialog::new()
-            .set_title("Extract to folder")
+            .set_title(t("Extract to folder"))
             .pick_folder()
         else {
             return;
@@ -1119,8 +1155,13 @@ impl Opened {
         let overwrite = self.overwrite;
         self.run(rt, "Extracting", move |v| {
             v.extract(&dest, &only, overwrite)
-                .map(|d| format!("Extracted {} file(s) to {}.", d.len(), dest.display()))
-                .map_err(|e| e.to_string())
+                .map(|d| {
+                    tf(
+                        "Extracted {0} file(s) to {1}.",
+                        &[&d.len(), &dest.display()],
+                    )
+                })
+                .map_err(|e| err(&e))
         });
     }
 
@@ -1133,27 +1174,25 @@ impl Opened {
         );
         ui.label(RichText::new(self.path.display().to_string()).weak());
         let Some(v) = &self.vault else {
-            ui.label("Working…");
+            ui.label(t("Working…"));
             return;
         };
         let total: u64 = v.entries().iter().map(|e| e.size).sum();
-        ui.label(format!(
-            "{} file(s), {} · key id {}",
-            v.entries().len(),
-            human_size(total),
-            v.key_id()
+        ui.label(tf(
+            "{0} file(s), {1} · key id {2}",
+            &[&v.entries().len(), &human_size(total), &v.key_id()],
         ));
 
         ui.add_space(6.0);
         let n_sel = self.selected.len();
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Extract all…").clicked() {
+            if ui.button(t("Extract all…")).clicked() {
                 self.extract(rt, Vec::new());
             }
             if ui
                 .add_enabled(
                     n_sel > 0,
-                    egui::Button::new(format!("Extract selected ({n_sel})…")),
+                    egui::Button::new(tf("Extract selected ({0})…", &[&n_sel])),
                 )
                 .clicked()
             {
@@ -1161,32 +1200,32 @@ impl Opened {
                 only.sort();
                 self.extract(rt, only);
             }
-            ui.checkbox(&mut self.overwrite, "Overwrite existing files");
+            ui.checkbox(&mut self.overwrite, t("Overwrite existing files"));
         });
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Add files…").clicked() {
+            if ui.button(t("Add files…")).clicked() {
                 if let Some(ps) = rfd::FileDialog::new().pick_files() {
                     self.add(rt, ps);
                 }
             }
-            if ui.button("Add folder…").clicked() {
+            if ui.button(t("Add folder…")).clicked() {
                 if let Some(ps) = rfd::FileDialog::new().pick_folders() {
                     self.add(rt, ps);
                 }
             }
-            ui.checkbox(&mut self.replace, "Replace files with the same name");
+            ui.checkbox(&mut self.replace, t("Replace files with the same name"));
             if ui
                 .add_enabled(
                     n_sel > 0,
-                    egui::Button::new(format!("Remove selected ({n_sel})")),
+                    egui::Button::new(tf("Remove selected ({0})", &[&n_sel])),
                 )
                 .clicked()
             {
                 self.confirm_remove = true;
             }
             if ui
-                .button("🔒 Lock")
-                .on_hover_text("Close the vault and wipe its key from memory")
+                .button(format!("🔒 {}", t("Lock")))
+                .on_hover_text(t("Close the vault and wipe its key from memory"))
                 .clicked()
             {
                 rt.go(Screen::Home);
@@ -1197,13 +1236,13 @@ impl Opened {
             let n = self.selected.len();
             let mut decision = None;
             let resp = egui::Modal::new(egui::Id::unique("confirm-remove")).show(ui.ctx(), |ui| {
-                ui.label(RichText::new(format!("Remove {n} file(s) from the vault?")).strong());
-                ui.label("This cannot be undone.");
+                ui.label(RichText::new(tf("Remove {0} file(s) from the vault?", &[&n])).strong());
+                ui.label(t("This cannot be undone."));
                 ui.horizontal(|ui| {
-                    if ui.button("Remove").clicked() {
+                    if ui.button(t("Remove")).clicked() {
                         decision = Some(true);
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(t("Cancel")).clicked() {
                         decision = Some(false);
                     }
                 });
@@ -1217,8 +1256,8 @@ impl Opened {
                     let names: Vec<String> = self.selected.iter().cloned().collect();
                     self.run(rt, "Removing", move |v| {
                         v.remove(&names)
-                            .map(|r| format!("Removed {} file(s).", r.len()))
-                            .map_err(|e| e.to_string())
+                            .map(|r| tf("Removed {0} file(s).", &[&r.len()]))
+                            .map_err(|e| err(&e))
                     });
                     return;
                 }
@@ -1228,10 +1267,10 @@ impl Opened {
         let Some(v) = &self.vault else { return };
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            let l = ui.label("Filter");
+            let l = ui.label(t("Filter"));
             ui.add(egui::TextEdit::singleline(&mut self.filter).desired_width(240.0))
                 .labelled_by(l.id);
-            if ui.button("Select shown").clicked() {
+            if ui.button(t("Select shown")).clicked() {
                 let f = self.filter.to_lowercase();
                 for e in v.entries() {
                     if e.path.to_lowercase().contains(&f) {
@@ -1239,7 +1278,7 @@ impl Opened {
                     }
                 }
             }
-            if ui.button("Clear selection").clicked() {
+            if ui.button(t("Clear selection")).clicked() {
                 self.selected.clear();
             }
         });
@@ -1260,13 +1299,13 @@ impl Opened {
             .header(20.0, |mut h| {
                 h.col(|_| {});
                 h.col(|ui| {
-                    ui.strong("Path");
+                    ui.strong(t("Path"));
                 });
                 h.col(|ui| {
-                    ui.strong("Size");
+                    ui.strong(t("Size"));
                 });
                 h.col(|ui| {
-                    ui.strong("Modified (UTC)");
+                    ui.strong(t("Modified (UTC)"));
                 });
             })
             .body(|body| {
@@ -1308,19 +1347,15 @@ pub struct Passwd {
 
 impl Passwd {
     fn ui(&mut self, ui: &mut egui::Ui, rt: &mut Runtime) {
-        ui.heading("Change password");
-        ui.label(
-            "The key stays the same, so your vaults keep working. Older copies of this key file \
-             (your backups) still open with the OLD password until you replace them. If someone \
-             may know the old password, use Rekey instead.",
-        );
-        section(ui, "Key file");
-        self.key.ui(ui, "Key file", None);
-        password_field(ui, "Current password", &mut self.old);
-        section(ui, "New password");
+        ui.heading(t("Change password"));
+        ui.label(t("The key stays the same, so your vaults keep working. Older copies of this key file (your backups) still open with the OLD password until you replace them. If someone may know the old password, use Rekey instead."));
+        section(ui, t("Key file"));
+        self.key.ui(ui, t("Key file"), None);
+        password_field(ui, t("Current password"), &mut self.old);
+        section(ui, t("New password"));
         let pw = new_password_fields(ui, &mut self.pw1, &mut self.pw2);
         let ready = self.key.id().is_some() && !self.old.is_empty() && pw.is_some();
-        if primary_button(ui, ready, "Save new password") {
+        if primary_button(ui, ready, t("Save new password")) {
             let (Some(new), Some(key)) = (pw, self.key.path.clone()) else {
                 return;
             };
@@ -1334,10 +1369,10 @@ impl Passwd {
                     .and_then(|()| Ok(std::fs::read(&key)?));
                 Box::new(move |app: &mut App| match r {
                     Ok(bytes) => {
-                        ok(app, "Password changed. Make fresh backups now; your old backups still use the old password.");
+                        ok(app, t("Password changed. Make fresh backups now; your old backups still use the old password."));
                         app.rt.go(Screen::Backup(Backup::new(key, bytes)));
                     }
-                    Err(e) => fail(app, e.to_string()),
+                    Err(e) => fail(app, err(&e)),
                 })
             });
         }
@@ -1354,12 +1389,16 @@ pub struct Verify {
 
 impl Verify {
     fn ui(&mut self, ui: &mut egui::Ui, rt: &mut Runtime) {
-        ui.heading("Verify a backup");
-        ui.label("Checks that a key file copy is intact and that your password opens it. Nothing is changed.");
-        section(ui, "Key file");
-        self.key.ui(ui, "Key file", None);
-        password_field(ui, "Password", &mut self.pw);
-        if primary_button(ui, self.key.id().is_some() && !self.pw.is_empty(), "Verify") {
+        ui.heading(t("Verify a backup"));
+        ui.label(t("Checks that a key file copy is intact and that your password opens it. Nothing is changed."));
+        section(ui, t("Key file"));
+        self.key.ui(ui, t("Key file"), None);
+        password_field(ui, t("Password"), &mut self.pw);
+        if primary_button(
+            ui,
+            self.key.id().is_some() && !self.pw.is_empty(),
+            t("Verify"),
+        ) {
             let pw = Password::new_unchecked(&self.pw);
             self.pw = Zeroizing::default();
             let key = self.key.path.clone().expect("checked");
@@ -1369,13 +1408,12 @@ impl Verify {
                 Box::new(move |app: &mut App| match r {
                     Ok(k) => ok(
                         app,
-                        format!(
-                            "OK: {} opens correctly (key id {}).",
-                            key.display(),
-                            k.key_id()
+                        tf(
+                            "OK: {0} opens correctly (key id {1}).",
+                            &[&key.display(), &k.key_id()],
                         ),
                     ),
-                    Err(e) => fail(app, e.to_string()),
+                    Err(e) => fail(app, err(&e)),
                 })
             });
         }
@@ -1405,20 +1443,16 @@ impl Rekey {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, rt: &mut Runtime) {
-        ui.heading("Rekey vaults");
-        ui.label(
-            "Creates a brand-new key file and re-encrypts the listed vaults for it. Afterwards the old \
-             key file (and every copy of it) can no longer open them. Use this if a key file copy or \
-             the password may have leaked.",
-        );
-        section(ui, "Current key");
-        self.key.ui(ui, "Current key file", None);
-        password_field(ui, "Current password", &mut self.pw);
+        ui.heading(t("Rekey vaults"));
+        ui.label(t("Creates a brand-new key file and re-encrypts the listed vaults for it. Afterwards the old key file (and every copy of it) can no longer open them. Use this if a key file copy or the password may have leaked."));
+        section(ui, t("Current key"));
+        self.key.ui(ui, t("Current key file"), None);
+        password_field(ui, t("Current password"), &mut self.pw);
 
-        section(ui, "Vaults to move");
-        if ui.button("Add vaults…").clicked() {
+        section(ui, t("Vaults to move"));
+        if ui.button(t("Add vaults…")).clicked() {
             if let Some(ps) = rfd::FileDialog::new()
-                .add_filter("Securidge vault", &[vault::EXTENSION])
+                .add_filter(t("Securidge vault"), &[vault::EXTENSION])
                 .pick_files()
             {
                 for p in ps {
@@ -1445,11 +1479,11 @@ impl Rekey {
                     }
                     (Some(_), Some(_)) => {
                         all_match = false;
-                        error_text(ui, &format!("{p}: belongs to a different key file"));
+                        error_text(ui, &tf("{0}: belongs to a different key file", &[&p]));
                     }
                     (None, _) => {
                         all_match = false;
-                        error_text(ui, &format!("{p}: not a readable vault"));
+                        error_text(ui, &tf("{0}: not a readable vault", &[&p]));
                     }
                     (Some(_), None) => {
                         all_match = false;
@@ -1461,12 +1495,12 @@ impl Rekey {
         if let Some(i) = remove {
             self.vaults.remove(i);
         }
-        ui.label(RichText::new("Vaults you do not list keep needing the OLD key file.").weak());
+        ui.label(RichText::new(t("Vaults you do not list keep needing the OLD key file.")).weak());
 
-        section(ui, "New key file");
+        section(ui, t("New key file"));
         if let Some(p) = path_row(
             ui,
-            "Save new key file to",
+            t("Save new key file to"),
             &self.new_key,
             Pick::SaveKey,
             "new-key.svkey",
@@ -1475,7 +1509,7 @@ impl Rekey {
         }
         let exists = self.new_key.as_ref().is_some_and(|p| p.exists());
         if exists {
-            error_text(ui, "That file already exists. Choose a new name.");
+            error_text(ui, t("That file already exists. Choose a new name."));
         }
         let pw = new_password_fields(ui, &mut self.pw1, &mut self.pw2);
 
@@ -1485,7 +1519,7 @@ impl Rekey {
             && !exists
             && self.new_key.is_some()
             && pw.is_some();
-        if primary_button(ui, ready, "Rekey") {
+        if primary_button(ui, ready, t("Rekey")) {
             let (Some(new_pw), Some(new_path), Some(old_path)) =
                 (pw, self.new_key.clone(), self.key.path.clone())
             else {
@@ -1501,15 +1535,15 @@ impl Rekey {
                 let r = rekey_all(&old_path, &old_pw, &vaults, &new_path, &new_pw, cfg);
                 Box::new(move |app: &mut App| match r {
                     Err(e) => fail(app, e),
-                    Ok((bytes, done, err)) => {
-                        let mut msg = format!(
-                            "Rekeyed {} vault(s). Back up the new key file now, then destroy every copy of the old one.",
-                            done.len()
+                    Ok((bytes, done, stopped)) => {
+                        let mut msg = tf(
+                            "Rekeyed {0} vault(s). Back up the new key file now, then destroy every copy of the old one.",
+                            &[&done.len()],
                         );
-                        if let Some(e) = err {
-                            msg = format!(
-                                "Rekeyed {} vault(s), then stopped: {e}. Vaults not yet rekeyed still need the OLD key file. Back up the new key file now.",
-                                done.len()
+                        if let Some(e) = stopped {
+                            msg = tf(
+                                "Rekeyed {0} vault(s), then stopped: {1}. Vaults not yet rekeyed still need the OLD key file. Back up the new key file now.",
+                                &[&done.len(), &e],
                             );
                             fail(app, msg);
                         } else {
@@ -1536,24 +1570,24 @@ pub fn rekey_all(
     new_pw: &Password,
     cfg: Config,
 ) -> Result<RekeyResult, String> {
-    let old = keyfile::open_file(old_path, old_pw, &cfg.limits).map_err(|e| e.to_string())?;
+    let old = keyfile::open_file(old_path, old_pw, &cfg.limits).map_err(|e| err(&e))?;
     // The same vault under two spellings (case, links) must be rekeyed once.
     let mut unique: Vec<PathBuf> = Vec::new();
     for v in vaults {
         let c = v
             .canonicalize()
-            .map_err(|e| format!("{}: {e}", v.display()))?;
+            .map_err(|e| tf("{0}: {1}", &[&v.display(), &err(&e.into())]))?;
         if !unique.contains(&c) {
             unique.push(c);
         }
     }
     let vaults = &unique;
     for v in vaults {
-        let id = Vault::peek_key_id(v).map_err(|e| format!("{}: {e}", v.display()))?;
+        let id = Vault::peek_key_id(v).map_err(|e| tf("{0}: {1}", &[&v.display(), &err(&e)]))?;
         if id != old.key_id() {
-            return Err(format!(
-                "{} does not belong to this key file; nothing was changed",
-                v.display()
+            return Err(tf(
+                "{0} does not belong to this key file; nothing was changed",
+                &[&v.display()],
             ));
         }
     }
@@ -1561,14 +1595,14 @@ pub fn rekey_all(
     // Write the new key first: if a vault fails below, the user still holds
     // a key for every vault (old or new).
     let bytes = keyfile::seal(&new, new_pw, cfg.params, &cfg.limits)
-        .map_err(|e| format!("Could not create the new key: {e}"))?
+        .map_err(|e| tf("Could not create the new key: {0}", &[&err(&e)]))?
         .to_vec();
     keyfile::write_copy(new_path, &bytes)
-        .map_err(|e| format!("Could not write the new key file: {e}"))?;
+        .map_err(|e| tf("Could not write the new key file: {0}", &[&err(&e)]))?;
     let mut done = Vec::new();
     for v in vaults {
         if let Err(e) = vault::rekey(v, &old, &new) {
-            return Ok((bytes, done, Some(format!("{}: {e}", v.display()))));
+            return Ok((bytes, done, Some(tf("{0}: {1}", &[&v.display(), &err(&e)]))));
         }
         done.push(v.clone());
     }

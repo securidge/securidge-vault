@@ -19,6 +19,7 @@ const CFG: Config = Config {
         t: 1,
         p: 1,
     },
+    save_settings: false,
 };
 const PW: &str = "maple river lantern quietly";
 
