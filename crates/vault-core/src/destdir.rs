@@ -32,8 +32,13 @@ pub struct Slot {
 }
 
 fn map_escape(e: io::Error, what: &Path) -> Error {
-    // cap-std reports an attempted escape as PermissionDenied.
-    if e.kind() == io::ErrorKind::PermissionDenied {
+    // cap-std reports an attempted escape as a synthetic PermissionDenied
+    // error (no OS error code). A real "access denied" from the OS (read-only
+    // folder, antivirus lock) stays an ordinary I/O error.
+    let escape = e.kind() == io::ErrorKind::PermissionDenied
+        && e.raw_os_error().is_none()
+        && e.to_string().contains("outside");
+    if escape {
         Error::UnsafePath(format!(
             "{} leads outside the destination folder",
             what.display()
@@ -132,7 +137,9 @@ impl Slot {
         for _ in 0..8 {
             let suffix: [u8; 8] = rng::array();
             let hex: String = suffix.iter().map(|b| format!("{b:02x}")).collect();
-            let tmp = format!(".{}.{hex}.svtmp", self.name);
+            // Fixed-length name, independent of the entry name, so a long
+            // (but valid) entry name never makes the temp name too long.
+            let tmp = format!(".svtmp-{hex}");
             match self
                 .dir
                 .open_with(&tmp, OpenOptions::new().write(true).create_new(true))
@@ -162,5 +169,15 @@ impl Slot {
 
     pub fn remove_tmp(&self, tmp: &str) {
         let _ = self.dir.remove_file(tmp);
+    }
+
+    /// Path of a temp file in this folder, for Windows alternate data
+    /// streams only (Mark-of-the-Web); never used to open file contents.
+    #[cfg(windows)]
+    pub fn tmp_display(&self, tmp: &str) -> PathBuf {
+        self.display
+            .parent()
+            .map(|p| p.join(tmp))
+            .unwrap_or_else(|| PathBuf::from(tmp))
     }
 }

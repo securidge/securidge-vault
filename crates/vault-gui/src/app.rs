@@ -58,6 +58,8 @@ pub struct Runtime {
     job: Option<Job>,
     notice: Option<Notice>,
     nav: Option<Screen>,
+    /// The user was already warned that closing skips unfinished backups.
+    close_warned: bool,
 }
 
 impl Runtime {
@@ -148,6 +150,7 @@ impl App {
                 job: None,
                 notice: None,
                 nav: None,
+                close_warned: false,
             },
         }
     }
@@ -166,6 +169,11 @@ impl App {
 
     pub fn busy(&self) -> bool {
         self.rt.job.is_some()
+    }
+
+    /// On the backup screen with copies not yet verified.
+    pub fn backup_pending(&self) -> bool {
+        matches!(&self.screen, Screen::Backup(b) if !b.verified)
     }
 
     fn poll_job(&mut self) {
@@ -243,16 +251,29 @@ impl eframe::App for App {
 
         // Closing the window mid-write is safe (the vault is replaced only
         // after the new copy is complete) but leaves a temp file behind.
-        if ui.ctx().input(|i| i.viewport().close_requested()) && self.busy() {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            info(self, "Please wait until the current operation finishes.");
+        if ui.ctx().input(|i| i.viewport().close_requested()) {
+            if self.busy() {
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                info(self, "Please wait until the current operation finishes.");
+            } else if self.backup_pending() && !self.rt.close_warned {
+                // DESIGN.md §5.1: the backup step is never skipped silently.
+                ui.ctx()
+                    .send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.rt.close_warned = true;
+                fail(
+                    self,
+                    "Your key file has no verified backups yet. Finish the backups, or close again to quit anyway.",
+                );
+            }
         }
 
         egui::Panel::top("top").show(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                let home = !matches!(self.screen, Screen::Home);
+                // Leaving the backup flow is only possible by finishing it or
+                // by explicitly accepting the risk (DESIGN.md §5.1).
+                let home = !matches!(self.screen, Screen::Home) && !self.backup_pending();
                 if home
                     && ui
                         .add_enabled(!self.busy(), egui::Button::new("⬅ Home"))
@@ -1503,7 +1524,8 @@ impl Rekey {
 }
 
 /// Returns the new key file's bytes, the vaults rekeyed, and the first
-/// error if one stopped the run part-way. `Err` means nothing was changed.
+/// error if one stopped the run part-way. `Err` means no vault was changed
+/// (a new key file may exist if only its read-back failed).
 type RekeyResult = (Vec<u8>, Vec<PathBuf>, Option<String>);
 
 pub fn rekey_all(
@@ -1515,6 +1537,17 @@ pub fn rekey_all(
     cfg: Config,
 ) -> Result<RekeyResult, String> {
     let old = keyfile::open_file(old_path, old_pw, &cfg.limits).map_err(|e| e.to_string())?;
+    // The same vault under two spellings (case, links) must be rekeyed once.
+    let mut unique: Vec<PathBuf> = Vec::new();
+    for v in vaults {
+        let c = v
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", v.display()))?;
+        if !unique.contains(&c) {
+            unique.push(c);
+        }
+    }
+    let vaults = &unique;
     for v in vaults {
         let id = Vault::peek_key_id(v).map_err(|e| format!("{}: {e}", v.display()))?;
         if id != old.key_id() {
@@ -1527,9 +1560,11 @@ pub fn rekey_all(
     let new = UnlockedKey::generate();
     // Write the new key first: if a vault fails below, the user still holds
     // a key for every vault (old or new).
-    keyfile::write_file(new_path, &new, new_pw, cfg.params, &cfg.limits)
+    let bytes = keyfile::seal(&new, new_pw, cfg.params, &cfg.limits)
+        .map_err(|e| format!("Could not create the new key: {e}"))?
+        .to_vec();
+    keyfile::write_copy(new_path, &bytes)
         .map_err(|e| format!("Could not write the new key file: {e}"))?;
-    let bytes = std::fs::read(new_path).map_err(|e| e.to_string())?;
     let mut done = Vec::new();
     for v in vaults {
         if let Err(e) = vault::rekey(v, &old, &new) {

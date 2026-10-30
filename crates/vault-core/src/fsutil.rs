@@ -16,14 +16,12 @@ pub fn create_tmp(path: &Path) -> Result<(PathBuf, File)> {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
     };
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
     for _ in 0..8 {
         let suffix: [u8; 8] = rng::array();
         let hex: String = suffix.iter().map(|b| format!("{b:02x}")).collect();
-        let tmp = dir.join(format!(".{name}.{hex}.svtmp"));
+        // Short fixed-length name: a long target name must not push the
+        // temp name over the file system's 255-character limit.
+        let tmp = dir.join(format!(".svtmp-{hex}"));
         match OpenOptions::new().write(true).create_new(true).open(&tmp) {
             Ok(f) => return Ok((tmp, f)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,

@@ -310,8 +310,17 @@ fn change_password_then_verify() {
     // Straight into making fresh backups.
     assert_eq!(screen(&h), "backup", "{:?}", h.state().notice());
 
-    h.get_by_label("⬅ Home").click();
+    // Home is not offered until backups are done or the risk is accepted.
+    assert!(h.query_by_label("⬅ Home").is_none());
+    assert!(h.state().backup_pending());
+    h.get_by_label(
+        "I accept that if I lose this key file or forget the password, my data is gone.",
+    )
+    .click();
     h.run_steps(2);
+    h.get_by_label("Skip backups").click();
+    h.run_steps(2);
+    assert_eq!(screen(&h), "home");
     h.get_by_label("Verify a backup").click();
     h.run_steps(2);
     if let Screen::Verify(s) = h.state_mut().screen_mut() {

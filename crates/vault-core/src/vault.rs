@@ -316,6 +316,9 @@ impl Vault {
             self.select(only)?
         };
         let root = DestDir::open(dest)?;
+        // DESIGN.md §7.2: extracted files inherit the vault's Mark-of-the-Web.
+        #[cfg(windows)]
+        let zone = read_zone_identifier(&self.path);
         let mut src = BufReader::new(File::open(&self.path)?);
         let aad = self.header.aad(DOMAIN_ENTRY);
         let mut done = Vec::new();
@@ -343,7 +346,15 @@ impl Vault {
             if !overwrite {
                 slot.reserve()?;
             }
-            let (tmp, f) = slot.create_tmp()?;
+            let (tmp, f) = match slot.create_tmp() {
+                Ok(x) => x,
+                Err(err) => {
+                    if !overwrite {
+                        slot.remove_placeholder();
+                    }
+                    return Err(err);
+                }
+            };
             let result = (|| -> Result<()> {
                 let mut w = BufWriter::new(f);
                 decrypt_entry(&mut src, e, &self.fek, &aad, &mut w)?;
@@ -356,6 +367,10 @@ impl Vault {
                 }
                 f.sync_all()?;
                 drop(f);
+                #[cfg(windows)]
+                if let Some(zone) = &zone {
+                    mark_of_the_web(&slot.tmp_display(&tmp), zone);
+                }
                 slot.commit(&tmp)
             })();
             if let Err(err) = result {
@@ -405,6 +420,25 @@ impl Vault {
         self.entries = staged.commit(&path)?;
         Ok(())
     }
+}
+
+/// The vault's `Zone.Identifier` stream (Mark-of-the-Web), if it has one.
+#[cfg(windows)]
+fn read_zone_identifier(vault: &Path) -> Option<Vec<u8>> {
+    let mut p = vault.as_os_str().to_owned();
+    p.push(":Zone.Identifier");
+    fs::read(PathBuf::from(p))
+        .ok()
+        .filter(|z| !z.is_empty() && z.len() <= 64 * 1024)
+}
+
+/// Copies Mark-of-the-Web onto an extracted file. Best effort: file systems
+/// without alternate data streams (FAT32, exFAT) cannot store it.
+#[cfg(windows)]
+fn mark_of_the_web(file: &Path, zone: &[u8]) {
+    let mut p = file.as_os_str().to_owned();
+    p.push(":Zone.Identifier");
+    let _ = fs::write(PathBuf::from(p), zone);
 }
 
 /// Moves a vault to a new key (DESIGN.md §4.5).
