@@ -29,7 +29,15 @@ jobs:
         working-directory: fuzz
         env:
           SECONDS_TO_RUN: ${{ github.event_name == 'schedule' && '1800' || '120' }}
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=$SECONDS_TO_RUN -rss_limit_mb=2048
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! cargo fuzz run ${{ matrix.target }} -- -max_total_time=$SECONDS_TO_RUN -rss_limit_mb=2048 2>&1 | tee fuzz.log; then
+            # Surface the failure as one annotation (readable without log access).
+            msg=$(grep -E "error|panicked|SUMMARY|ERROR|Test unit|deadly" fuzz.log | head -40 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=fuzz ${{ matrix.target }} failed::${msg}"
+            exit 1
+          fi
       - name: Keep crashing inputs
         if: failure()
         uses: actions/upload-artifact@v4

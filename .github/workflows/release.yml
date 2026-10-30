@@ -1,0 +1,159 @@
+name: Release
+
+# Push a tag like v0.2.0 (matching the version in Cargo.toml) to build,
+# sign (when a certificate is configured), checksum, attest and stage a
+# DRAFT GitHub release. A person reviews the draft and publishes it.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (e.g. v0.2.0). Leave empty for a dry run of the current commit."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  # A manual run without a tag is a dry run: build, sign and package the
+  # current commit, upload it as a workflow artifact, publish nothing.
+  DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag == '' }}
+  TAG: ${{ github.event.inputs.tag || (github.event_name == 'push' && github.ref_name) || 'v0.0.0-dryrun' }}
+  REF: ${{ github.event.inputs.tag || github.sha }}
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.REF }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked
+
+  build:
+    name: Build, sign, attest
+    needs: test
+    runs-on: windows-latest
+    permissions:
+      contents: write # create the draft release
+      id-token: write # build provenance
+      attestations: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.REF }}
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Tag must match the crate version
+        if: env.DRY_RUN != 'true'
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::tag $TAG does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - name: Build
+        shell: bash
+        run: |
+          # No build-machine paths in the binary and a deterministic PE
+          # header: steps towards reproducible builds (DESIGN.md §9).
+          export RUSTFLAGS="--remap-path-prefix=$(cygpath -w "$GITHUB_WORKSPACE")=. --remap-path-prefix=$(cygpath -w "$HOME/.cargo")=cargo -C link-arg=/Brepro"
+          cargo build --release --locked -p vault-cli -p vault-gui
+
+      - name: Sign (Authenticode)
+        id: sign
+        shell: pwsh
+        env:
+          CERT_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_CERT_PFX_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERT_PASSWORD }}
+        run: |
+          if (-not $env:CERT_PFX_BASE64) {
+            "signed=false" >> $env:GITHUB_OUTPUT
+            Write-Host "::warning::No signing certificate configured; the release will be UNSIGNED."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_PFX_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          foreach ($f in "target\release\SecuridgeVault.exe", "target\release\securidge-vault.exe") {
+            & $signtool.FullName sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+              /f $pfx /p $env:CERT_PASSWORD $f
+            if ($LASTEXITCODE -ne 0) { throw "signing failed for $f" }
+            & $signtool.FullName verify /pa $f
+            if ($LASTEXITCODE -ne 0) { throw "verification failed for $f" }
+          }
+          Remove-Item $pfx
+          "signed=true" >> $env:GITHUB_OUTPUT
+
+      - name: Package and checksum
+        shell: pwsh
+        run: |
+          $out = "dist"
+          New-Item -ItemType Directory $out | Out-Null
+          Copy-Item target\release\SecuridgeVault.exe, target\release\securidge-vault.exe $out
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, SECURITY.md $out
+          $zip = "securidge-vault-$env:TAG-windows-x64.zip"
+          Compress-Archive -Path "$out\*" -DestinationPath $zip
+          $lines = foreach ($f in "$out\SecuridgeVault.exe", "$out\securidge-vault.exe", $zip) {
+            "$((Get-FileHash $f -Algorithm SHA256).Hash.ToLower())  $(Split-Path $f -Leaf)"
+          }
+          $lines | Out-File -Encoding ascii SHA256SUMS.txt
+          Get-Content SHA256SUMS.txt
+
+      - name: Dry run output
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dry-run
+          path: |
+            securidge-vault-*-windows-x64.zip
+            SHA256SUMS.txt
+
+      - name: Build provenance
+        if: env.DRY_RUN != 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/SecuridgeVault.exe
+            dist/securidge-vault.exe
+            securidge-vault-*-windows-x64.zip
+
+      - name: Draft release
+        if: env.DRY_RUN != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNED: ${{ steps.sign.outputs.signed }}
+        run: |
+          {
+            echo "> **Pre-release, not independently audited.** Do not use it for data you cannot afford to lose."
+            echo
+            if [ "$SIGNED" = "true" ]; then
+              echo "Binaries are Authenticode-signed."
+            else
+              echo "> **Unsigned build.** Windows SmartScreen will warn. Check the SHA-256 below and the build provenance before running."
+            fi
+            echo
+            echo "Verify the download:"
+            echo '```'
+            echo "gh attestation verify securidge-vault-$TAG-windows-x64.zip -R ${{ github.repository }}"
+            echo '```'
+            echo
+            echo "SHA-256:"
+            echo '```'
+            cat SHA256SUMS.txt
+            echo '```'
+          } > notes.md
+          gh release create "$TAG" --draft --prerelease --verify-tag \
+            --title "Securidge Vault $TAG" --notes-file notes.md \
+            "securidge-vault-$TAG-windows-x64.zip" SHA256SUMS.txt
