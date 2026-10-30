@@ -4,8 +4,7 @@
 //! both when stored and again when extracted, so a vault can never write
 //! outside the folder the user chose.
 
-use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 use crate::{Error, Result};
 
@@ -119,39 +118,6 @@ pub fn from_relative(rel: &Path) -> Result<String> {
 pub fn fold(path: &str) -> String {
     use unicode_normalization::UnicodeNormalization;
     path.nfc().collect::<String>().to_lowercase()
-}
-
-/// Resolves where `archive_path` should be written under `root`, creating
-/// parent folders as needed and refusing to pass through symlinks or
-/// junctions.
-///
-/// `root` must already exist and be canonical.
-pub fn prepare_target(root: &Path, archive_path: &str) -> Result<PathBuf> {
-    validate(archive_path)?;
-    let comps: Vec<&str> = archive_path.split('/').collect();
-    let (last, parents) = comps.split_last().expect("validated path is non-empty");
-    let mut cur = root.to_path_buf();
-    for comp in parents {
-        cur.push(comp);
-        match fs::symlink_metadata(&cur) {
-            Ok(m) if m.file_type().is_symlink() => {
-                return Err(Error::UnsafePath(format!(
-                    "{} is a link; refusing to follow it",
-                    cur.display()
-                )))
-            }
-            Ok(m) if m.is_dir() => {}
-            Ok(_) => {
-                return Err(Error::UnsafePath(format!(
-                    "{} exists and is not a folder",
-                    cur.display()
-                )))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&cur)?,
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(cur.join(last))
 }
 
 #[cfg(test)]

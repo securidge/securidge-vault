@@ -8,8 +8,13 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+# Exposes internal parsers to the fuzz targets in /fuzz. Not for normal use.
+fuzzing = []
+
 [dependencies]
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
+cap-std = "4"
 chacha20poly1305 = { version = "0.10", features = ["stream"] }
 getrandom = "0.2"
 thiserror = "1"
@@ -21,4 +26,10 @@ zstd = "0.13"
 libc = "0.2"
 
 [dev-dependencies]
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+hex = "0.4.3"
+serde_json = "1.0.154"
+sha2 = "0.11.1"
 tempfile = "3"
+zstd = "0.13"

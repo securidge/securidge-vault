@@ -30,6 +30,7 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use zeroize::Zeroizing;
 
+use crate::destdir::DestDir;
 use crate::fsutil;
 use crate::keyfile::{KeyId, UnlockedKey};
 use crate::{index, pathsafe, rng, Error, Result};
@@ -314,22 +315,25 @@ impl Vault {
         } else {
             self.select(only)?
         };
-        fs::create_dir_all(dest)?;
-        let root = dest.canonicalize()?;
+        let root = DestDir::open(dest)?;
         let mut src = BufReader::new(File::open(&self.path)?);
         let aad = self.header.aad(DOMAIN_ENTRY);
         let mut done = Vec::new();
 
         for e in &selected {
-            let target = pathsafe::prepare_target(&root, &e.path)?;
-            match fs::symlink_metadata(&target) {
-                Ok(m) if m.is_dir() => {
+            // All file operations below go through a handle of the entry's
+            // folder that cannot reach outside `dest` (see destdir.rs).
+            let slot = root.slot(&e.path)?;
+            match slot.existing()? {
+                Some(true) => {
                     return Err(Error::UnsafePath(format!(
                         "{} is a folder",
-                        target.display()
+                        slot.display.display()
                     )))
                 }
-                Ok(_) if !overwrite => return Err(Error::DestinationExists(target)),
+                Some(false) if !overwrite => {
+                    return Err(Error::DestinationExists(slot.display.clone()))
+                }
                 _ => {}
             }
             // Never write into an existing file: decrypt into a fresh temp
@@ -337,9 +341,9 @@ impl Vault {
             // instead of writing through it, and a failed entry never
             // touches the user's original file.
             if !overwrite {
-                fsutil::reserve_new(&target)?;
+                slot.reserve()?;
             }
-            let (tmp, f) = fsutil::create_tmp(&target)?;
+            let (tmp, f) = slot.create_tmp()?;
             let result = (|| -> Result<()> {
                 let mut w = BufWriter::new(f);
                 decrypt_entry(&mut src, e, &self.fek, &aad, &mut w)?;
@@ -352,22 +356,12 @@ impl Vault {
                 }
                 f.sync_all()?;
                 drop(f);
-                fsutil::commit(&tmp, &target)?;
-                // Detect a folder swapped for a link while we were writing.
-                let parent = target.parent().unwrap_or(&root).canonicalize()?;
-                if !parent.starts_with(&root) {
-                    let _ = fs::remove_file(&target);
-                    return Err(Error::UnsafePath(format!(
-                        "{} moved outside the destination during extraction",
-                        target.display()
-                    )));
-                }
-                Ok(())
+                slot.commit(&tmp)
             })();
             if let Err(err) = result {
-                let _ = fs::remove_file(&tmp);
+                slot.remove_tmp(&tmp);
                 if !overwrite {
-                    fsutil::remove_placeholder(&target);
+                    slot.remove_placeholder();
                 }
                 return Err(err);
             }

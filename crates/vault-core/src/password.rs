@@ -4,12 +4,12 @@
 //! - no composition rules
 //! - Unicode normalised to NFC before hashing, so the same password typed on
 //!   different keyboards or systems produces the same key
-//! - common passwords rejected
-//!
-//! The common-password list here is a small placeholder. A full offline list
-//! of breached passwords is an open item (DESIGN.md §12, question 4).
+//! - passwords found in a bundled offline list of breached passwords
+//!   (`data/breached-15plus.txt`, see `data/README.md`) are rejected, as are
+//!   a few well-known phrases and repetition patterns. No network lookup.
 
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
@@ -58,12 +58,30 @@ fn check_policy(pw: &str) -> Result<()> {
         return Err(Error::WeakPassword("too repetitive".into()));
     }
     let lower = pw.to_lowercase();
-    if COMMON.iter().any(|c| *c == lower) || is_repeated_common(&lower) {
+    if COMMON.iter().any(|c| *c == lower) || is_repeated_common(&lower) || is_breached(&lower) {
         return Err(Error::WeakPassword(
-            "this is a commonly used password".into(),
+            "it appears in lists of breached or common passwords".into(),
         ));
     }
     Ok(())
+}
+
+/// Breached passwords of 15+ characters, sorted by bytes (one per line).
+static BREACHED_RAW: &str = include_str!("../data/breached-15plus.txt");
+
+fn breached() -> &'static [&'static str] {
+    static LIST: OnceLock<Vec<&'static str>> = OnceLock::new();
+    LIST.get_or_init(|| BREACHED_RAW.lines().collect())
+}
+
+/// `lower` must already be NFC-normalised and lower-cased.
+pub fn is_breached(lower: &str) -> bool {
+    breached().binary_search(&lower).is_ok()
+}
+
+/// Number of entries in the bundled breached-password list.
+pub fn breached_list_len() -> usize {
+    breached().len()
 }
 
 /// Catches things like "passwordpassword1" or "qwertyqwertyqwerty".
@@ -116,6 +134,22 @@ mod tests {
         assert!(Password::new_checked("가나다라마바사아자차카타파하").is_err()); // 14 chars
         assert!(Password::new_checked("가나다라마바사아자차카타파하거").is_ok());
         // 15 chars
+    }
+
+    #[test]
+    fn breached_list() {
+        let list = breached();
+        assert!(list.len() > 100_000);
+        assert!(
+            list.windows(2).all(|w| w[0] < w[1]),
+            "must be sorted and unique"
+        );
+        assert!(list.iter().all(|p| p.chars().count() >= MIN_CHARS));
+        // Real entries from the corpus, in any case.
+        for p in ["1qaz2wsx3edc4rfv", "123456789qwerty", "QAZWSXEDCRFVTGB"] {
+            assert!(Password::new_checked(p).is_err(), "{p} should be rejected");
+        }
+        assert!(!is_breached("maple river lantern quietly"));
     }
 
     #[test]

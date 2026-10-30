@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod advice;
+mod destdir;
 mod error;
 mod fsutil;
 mod index;
@@ -29,3 +30,13 @@ pub use kdf::{KdfLimits, KdfParams};
 pub use keyfile::{KeyId, UnlockedKey};
 pub use password::Password;
 pub use vault::{Entry, Vault};
+
+/// Entry points for the fuzz targets in `/fuzz` (feature `fuzzing`).
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    /// Decodes a (decrypted) vault index. Must never panic or over-allocate.
+    pub fn index_decode(buf: &[u8], data_end: u64) {
+        let _ = crate::index::decode(buf, crate::vault::HEADER_LEN as u64, data_end);
+    }
+}

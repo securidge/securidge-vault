@@ -1,0 +1,5 @@
+# Binary fixtures must never be touched by line-ending conversion.
+*.svkey binary
+*.svault binary
+crates/vault-core/data/*.txt text eol=lf
+test-vectors/**/*.json text eol=lf

@@ -1,0 +1,38 @@
+name: Fuzz
+
+# Short runs on every push; long runs weekly. Targets are in /fuzz.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [index_decode, keyfile_parse, vault_open, path_validate]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Run
+        working-directory: fuzz
+        env:
+          SECONDS_TO_RUN: ${{ github.event_name == 'schedule' && '1800' || '120' }}
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=$SECONDS_TO_RUN -rss_limit_mb=2048
+      - name: Keep crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}

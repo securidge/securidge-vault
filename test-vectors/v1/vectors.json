@@ -1,0 +1,50 @@
+{
+  "description": "Securidge Vault format v1 known-answer vectors. See README.md in this folder.",
+  "entries": [
+    {
+      "compressed_size": 33,
+      "modified": 1767225600,
+      "path": "hello.txt",
+      "sha256": "76b00c68b70728e61cb336408543b6ed34fce46427eaee35e3ae480030d295ab",
+      "size": 24
+    },
+    {
+      "compressed_size": 9,
+      "modified": 1767225600,
+      "path": "empty.bin",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "size": 0
+    },
+    {
+      "compressed_size": 34,
+      "modified": 1767225600,
+      "path": "docs/한글 파일.txt",
+      "sha256": "5ede6121747e11e0838d87d218759532c69ba71a07fe7a9dde773189ef3f4323",
+      "size": 3400
+    },
+    {
+      "compressed_size": 1052930,
+      "modified": 1767225600,
+      "path": "big/random.bin",
+      "sha256": "c4c06eba2137e447a5ab0fddb7bb984541265383b91e72321d7407454a87ea79",
+      "size": 1052897
+    }
+  ],
+  "format_version": 1,
+  "kdf": {
+    "algorithm": "argon2id",
+    "m_kib": 262144,
+    "p": 1,
+    "t": 3,
+    "version": 19
+  },
+  "kek_hex": "9553286c3b029f7f3364d5d875730c42eedb43cbd9056e460cda4ec3794d90d8",
+  "key_file": "key.svkey",
+  "key_file_sha256": "2dc04de62d5233f9cc47c1a124d064b9d251b73ff78ab3ca5bdcdf61f77cdb6e",
+  "key_id": "0eb1d6e2e87986bc28d05d82e2adc88b",
+  "password": "Véritable test-vector passphrase",
+  "password_nfc_utf8_hex": "56c3a972697461626c6520746573742d766563746f722070617373706872617365",
+  "salt_hex": "770942b87289a04ef80b854f98d42934",
+  "vault_file": "vault.svault",
+  "vault_file_sha256": "401db26f862162b63fc940d16081db5635e33cca35ef28c51ef3d76ce44525c1"
+}

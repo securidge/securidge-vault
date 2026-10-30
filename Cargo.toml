@@ -21,3 +21,10 @@ strip = true
 opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
+# Keep the crypto and compression in tests close to release speed.
+[profile.dev.package.chacha20]
+opt-level = 3
+[profile.dev.package.poly1305]
+opt-level = 3
+[profile.dev.package.zstd-sys]
+opt-level = 3
