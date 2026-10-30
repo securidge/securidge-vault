@@ -38,6 +38,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
+      - name: Korean font for GUI tests (Linux)
+        # Windows ships Malgun Gothic; Linux runners have no Hangul font, and
+        # the GUI tests fail on any glyph that cannot be drawn.
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq fonts-noto-cjk
       - run: cargo test --locked
 
   build:
