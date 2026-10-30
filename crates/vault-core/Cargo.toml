@@ -14,7 +14,6 @@ fuzzing = []
 
 [dependencies]
 argon2 = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
-cap-std = "4"
 chacha20poly1305 = { version = "0.10", features = ["stream"] }
 getrandom = "0.2"
 thiserror = "1"
@@ -23,6 +22,8 @@ zeroize = { version = "1", features = ["derive"] }
 zstd = "0.13"
 
 [target.'cfg(unix)'.dependencies]
+# Handle-relative extraction (src/destdir/handles.rs).
+cap-std = "4"
 libc = "0.2"
 
 [dev-dependencies]

@@ -253,7 +253,12 @@ Each file is decrypted into a fresh temp file in its destination folder and then
 - a failed or tampered entry never touches the user's existing file;
 - without `overwrite`, the name is reserved with `create_new` first, so nothing that appears meanwhile is replaced.
 
-All of this happens through directory handles, not path strings: the destination is opened once, and every lookup, folder creation, temp file and rename is relative to an open handle of the entry's folder (`cap-std`, `vault-core/src/destdir.rs`). A lookup that would leave the destination — including through a folder that a local attacker swaps for a link or junction mid-extraction — fails. Existing links in parent folders are refused outright. (Before M3 this was a path-based re-check with a small race window.)
+How the destination is accessed differs by platform (`vault-core/src/destdir.rs`):
+
+- **Unix:** through directory handles, not path strings. The destination is opened once, and every lookup, folder creation, temp file and rename is relative to an open handle of the entry's folder (`cap-std`). A lookup that would leave the destination — including through a folder that a local attacker swaps for a link mid-extraction — fails.
+- **Windows:** by path. `cap-std` rebuilds paths from handles on Windows and fails for network destinations (`\\server\share`, mapped drives; confirmed in CI), so it is not used there. Links in parent folders are refused before use, and after each rename the file's folder is resolved again and must be inside the destination, otherwise the file is removed. **Residual risk (Windows only):** a local attacker who can write into the destination folder and wins a race could make one file appear outside it briefly before the re-check removes it.
+
+In both cases existing links in parent folders are refused outright.
 
 When adding files, inputs are opened without following a final link (`O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`) and checked to be regular files through the open handle.
 
