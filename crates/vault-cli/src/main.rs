@@ -396,46 +396,7 @@ fn report_skipped(skipped: &[PathBuf]) {
 
 /// DESIGN.md §5.2: warn about risky key file locations. Never blocks.
 fn warn_key_location(key: &Path, vault: Option<&Path>) {
-    let abs = |p: &Path| -> PathBuf {
-        let parent = p
-            .parent()
-            .filter(|x| !x.as_os_str().is_empty())
-            .unwrap_or(Path::new("."));
-        parent
-            .canonicalize()
-            .map(|d| d.join(p.file_name().unwrap_or_default()))
-            .unwrap_or_else(|_| p.to_path_buf())
-    };
-    let key_abs = abs(key);
-    let lower = key_abs.to_string_lossy().to_lowercase();
-
-    if let Some(v) = vault {
-        if abs(v).parent() == key_abs.parent() {
-            eprintln!("warning: the key file is in the same folder as the vault. Anyone who copies the folder gets both.");
-        }
-    }
-    if [
-        "onedrive",
-        "dropbox",
-        "google drive",
-        "googledrive",
-        "icloud",
-    ]
-    .iter()
-    .any(|s| lower.contains(s))
-    {
-        eprintln!(
-            "warning: the key file is in a cloud-synced folder. A copy may be stored online."
-        );
-    }
-    #[cfg(windows)]
-    {
-        let sys = std::env::var("SystemDrive")
-            .unwrap_or_else(|_| "C:".into())
-            .to_lowercase();
-        let path = lower.trim_start_matches(r"\\?\");
-        if path.starts_with(&sys) {
-            eprintln!("warning: the key file is on the system drive. Malware that steals files can find it; prefer a USB drive.");
-        }
+    for w in vault_core::advice::key_location(key, vault) {
+        eprintln!("warning: {}", w.message());
     }
 }

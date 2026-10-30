@@ -174,6 +174,21 @@ pub fn write_file(
     fsutil::write_new(path, &bytes)
 }
 
+/// Writes an exact copy of key file `bytes` to a new file at `path`
+/// (refuses to overwrite) and reads it back to confirm it landed intact.
+/// Used for backups: the copy opens with the same password.
+pub fn write_copy(path: &Path, bytes: &[u8]) -> Result<()> {
+    inspect(bytes)?;
+    fsutil::write_new(path, bytes)?;
+    if std::fs::read(path)? != bytes {
+        return Err(Error::InvalidInput(format!(
+            "{} did not read back correctly; the drive may be faulty",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Opens the key file at `path`.
 pub fn open_file(path: &Path, password: &Password, limits: &KdfLimits) -> Result<UnlockedKey> {
     let bytes = std::fs::read(path)?;

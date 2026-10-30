@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod advice;
 mod error;
 mod fsutil;
 mod index;

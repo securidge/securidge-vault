@@ -1,0 +1,26 @@
+[package]
+name = "vault-gui"
+description = "Desktop app for Securidge Vault"
+version.workspace = true
+edition.workspace = true
+# eframe 0.37 needs a newer compiler than the core library.
+rust-version = "1.95"
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "SecuridgeVault"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "accesskit"] }
+egui = { version = "0.37", default-features = false, features = ["monochrome_emoji_fonts"] }
+egui_extras = "0.37"
+rfd = "0.17"
+vault-core = { version = "0.1.0", path = "../vault-core" }
+zeroize = "1.9.1"
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["eframe"] }
+tempfile = "3.27.0"
