@@ -53,7 +53,7 @@ XChaCha20-Poly1305 for all encryption, Argon2id for the password, Zstandard comp
 
 ## Building
 
-Requires Rust 1.80+.
+Requires Rust 1.89+.
 
 ```text
 cargo test

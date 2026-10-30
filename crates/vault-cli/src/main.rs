@@ -96,7 +96,7 @@ enum Cmd {
         #[arg(required = true)]
         entries: Vec<String>,
     },
-    /// Move vaults to a brand-new key. Old key file copies stop working for them.
+    /// Re-encrypt vaults under a brand-new key. Old key file copies can no longer open them.
     Rekey {
         /// Current key file.
         #[arg(long)]
@@ -328,6 +328,7 @@ fn run() -> Result<()> {
             );
             eprintln!("Back up the new key file now, then destroy every copy of the old one.");
             eprintln!("Vaults you did not list here still need the OLD key file.");
+            eprintln!("Older copies of these vaults (e.g. backups) still open with the old key; replace them.");
         }
     }
     Ok(())

@@ -90,7 +90,7 @@ There is no recovery path. Neither the author nor anyone else can open a vault w
 | Password hashing | Argon2id (RFC 9106) | Memory-hard; parameters stored per key file. |
 | Randomness | OS CSPRNG (`BCryptGenRandom` via `getrandom`) | Used for MK, FEK, salts, nonces. Never time or hardware serials. |
 | Compression | Zstandard | Applied *before* encryption. |
-| Memory hygiene | Zeroize secrets after use | Keys, passwords, decrypted index. |
+| Memory hygiene | Zeroize secrets after use | Keys, passwords, decrypted index, Argon2 memory. Best effort: I/O buffers and compressor state are not wiped. |
 
 Key hierarchy:
 
@@ -174,7 +174,7 @@ File names, folder structure, and per-file sizes are therefore hidden. The **tot
 
 **Add / replace / remove.** Every change writes a complete new vault: header, the kept entries copied verbatim as ciphertext (not re-encrypted), new entries, a new index, a new trailer. There is no dead space and no old index left in the file, so an attacker with write access cannot roll the file list back to an earlier version stored in the same file. Cost: each change rewrites the whole file (I/O only). No separate Compact command is needed.
 
-**Crash safety.** Writes go to `<name>.svault.tmp`, are synced, then renamed over the original. A crash leaves the previous vault intact. A leftover `.tmp` file contains only ciphertext.
+**Crash safety and concurrency.** Writes go to a uniquely named temp file next to the vault (`.<name>.<random>.svtmp`, created with `create_new`, so a planted file or link at a predictable name is never followed), are synced, then renamed over the original; on Unix the folder is synced too. A crash leaves the previous vault intact, and a leftover `.svtmp` file contains only ciphertext. While a vault is being changed it holds an advisory exclusive lock; a second writer is refused. Creating a vault first reserves the name with `create_new`, so a file that appears in the meantime is never replaced.
 
 **Limitations of format v1.**
 - An attacker who can replace the whole file can substitute an *older copy of the same vault* (e.g., from a backup). Detecting this would require state outside the file.
@@ -186,8 +186,9 @@ File names, folder structure, and per-file sizes are therefore hidden. The **tot
 These are different operations, and the UI must not blur them.
 
 - **Change password.** Decrypt MK with the old KEK, re-encrypt it with a new KEK (new salt). Only the key file changes; takes seconds. **Limitation:** any *old copy* of the key file still opens with the *old* password. If the old password may be compromised, password change alone is not enough.
-- **Rekey (compromise response).** Generate a new MK and `key_id`, write the new key file first, then rewrite `key_id`, `fek_nonce` and `fek_wrapped` of every selected vault. Each vault is fully verified (index decrypted) before its header is replaced. Only headers change; vault data is not re-encrypted, so this is still fast. Old key file copies become useless for rekeyed vaults. The user must then destroy old key file copies and back up the new one.
-- **Limitation:** rekey does not change the FEK. Someone who already extracted a vault's FEK (which requires the old key file *and* old password) and keeps a copy of the vault can still read that copy. Rekey protects against future use of a leaked key, not against data already taken.
+- **Rekey (compromise response).** Generate a new MK and `key_id` and write the new key file first. Then, for every selected vault, generate a **new FEK and new `vault_id`** and re-encrypt every entry chunk from the old FEK to the new one (no decompression or recompression, so chunk and file sizes stay the same). Afterwards the old key cannot read anything in the rekeyed vault, and splicing an old header onto the new file fails because both the FEK and the AAD (`vault_id`) changed. The user must then destroy old key file copies and back up the new one.
+- **Limitation:** older *copies of the vault* (e.g., backups made before the rekey) are still encrypted under the old key. Rekey protects the current file, not copies that already exist elsewhere.
+- *History:* the first M1 implementation rewrapped only the header and kept the FEK and `vault_id`. An internal review showed that splicing the pre-rekey header onto the post-rekey file let the old key read data added after the rekey. Fixed before any release.
 
 ### 4.6 What we deliberately do not do
 
@@ -241,12 +242,24 @@ On extraction, every entry path is normalized and rejected if it:
 
 - is absolute, has a drive letter, or is a UNC path
 - contains `..` that escapes the destination
-- uses reserved Windows names (`CON`, `NUL`, `COM1`, …) or alternate data streams (`:`)
+- uses reserved Windows names (`CON`, `NUL`, `COM0`–`COM9`, `LPT0`–`LPT9`, superscript variants, `CONIN$`, `CONOUT$`) or alternate data streams (`:`)
+- looks like an 8.3 short name (`LONGNA~1`), which could alias another file
+- collides with another entry after Unicode NFC normalisation and case folding
 - resolves through a symlink or junction outside the destination
+
+Each file is decrypted into a fresh temp file in its destination folder and then renamed into place. This means:
+
+- an existing file or link at the target is *replaced*, never written through (hard links included);
+- a failed or tampered entry never touches the user's existing file;
+- without `overwrite`, the name is reserved with `create_new` first, so nothing that appears meanwhile is replaced.
+
+After each rename the parent folder is re-checked to be inside the destination. **Residual risk:** a local attacker who can write to the destination folder and races folder creation could still make one file land outside it before the re-check removes it. Fully closing this needs handle-relative file APIs (e.g., `cap-std`); planned for M3.
+
+When adding files, inputs are opened without following a final link (`O_NOFOLLOW` / `FILE_FLAG_OPEN_REPARSE_POINT`) and checked to be regular files through the open handle.
 
 ### 7.2 Plaintext hygiene
 
-- Decrypted data is streamed directly to the user-chosen destination. No plaintext temp files.
+- Decrypted data is streamed into a temp file in the user-chosen destination folder, then renamed. It never goes to a system temp folder.
 - "Preview" (open a file without extracting) is **not** in v1, because it requires a temp file that the app cannot reliably wipe.
 - Mark-of-the-Web: if the vault itself carries a Zone.Identifier, extracted files inherit it.
 
@@ -334,6 +347,6 @@ M1 status: round-trip, every-byte-flip, every-truncation, entry-swap, key-mismat
 |---|---|---|
 | Factors | Key file + password, always | Password, optional key file |
 | Password change | Re-encrypts key file only | Re-encrypts every archive |
-| Compromise response | Rekey rewrites headers only (see §4.5 limitation) | Re-encrypt everything |
+| Compromise response | Rekey re-encrypts chunks without recompressing (§4.5) | Re-encrypt everything |
 | Archive operations | List / extract one / add / replace without full decrypt | Often decrypt whole volume |
 | Weak password | Rejected | Allowed |

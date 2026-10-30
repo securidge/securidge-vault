@@ -340,10 +340,15 @@ fn rekey_invalidates_old_key() {
     vault::rekey(&vpath, &old, &new).unwrap();
     let after = fs::read(&vpath).unwrap();
     assert_eq!(before.len(), after.len());
-    assert_eq!(
+    assert_ne!(
+        before[12..28],
+        after[12..28],
+        "rekey must give the vault a new vault_id"
+    );
+    assert_ne!(
         before[vault::HEADER_LEN..],
         after[vault::HEADER_LEN..],
-        "rekey must only touch the header"
+        "rekey must re-encrypt the data"
     );
 
     assert!(matches!(
@@ -408,4 +413,138 @@ fn format_time_is_sane() {
     assert_eq!(vault::format_time(0), "1970-01-01 00:00");
     assert_eq!(vault::format_time(1_798_675_200), "2026-12-31 00:00");
     let _ = PathBuf::new();
+}
+
+/// Review finding H1: splicing the pre-rekey header onto the rekeyed file
+/// must not let the old key read anything.
+#[test]
+fn old_header_splice_after_rekey_fails() {
+    let dir = TempDir::new().unwrap();
+    let a = dir.path().join("a.txt");
+    fs::write(&a, b"before rekey").unwrap();
+    let old = key();
+    let vpath = dir.path().join("v.svault");
+    Vault::create(&vpath, &old, &[a]).unwrap();
+    let old_header = fs::read(&vpath).unwrap()[..vault::HEADER_LEN].to_vec();
+
+    let new = key();
+    vault::rekey(&vpath, &old, &new).unwrap();
+    let secret = dir.path().join("secret.txt");
+    fs::write(&secret, b"added after rekey").unwrap();
+    Vault::open(&vpath, &new)
+        .unwrap()
+        .add(std::slice::from_ref(&secret), false)
+        .unwrap();
+
+    let mut spliced = fs::read(&vpath).unwrap();
+    spliced[..vault::HEADER_LEN].copy_from_slice(&old_header);
+    let bad = dir.path().join("spliced.svault");
+    fs::write(&bad, &spliced).unwrap();
+    let r = Vault::open(&bad, &old).and_then(|v| v.extract(&dir.path().join("out"), &[], true));
+    assert!(r.is_err(), "old key must not read a rekeyed vault");
+}
+
+/// Review finding M1: a failed overwrite must leave the original file intact.
+#[test]
+fn failed_overwrite_keeps_original_file() {
+    let dir = TempDir::new().unwrap();
+    let f = dir.path().join("f.txt");
+    fs::write(&f, b"from vault").unwrap();
+    let k = key();
+    let vpath = dir.path().join("v.svault");
+    let (v, _) = Vault::create(&vpath, &k, &[f]).unwrap();
+    let off = vault::HEADER_LEN + 5;
+    drop(v);
+    let mut m = fs::read(&vpath).unwrap();
+    m[off] ^= 1;
+    fs::write(&vpath, &m).unwrap();
+
+    let out = dir.path().join("out");
+    fs::create_dir(&out).unwrap();
+    fs::write(out.join("f.txt"), b"precious original").unwrap();
+    let v = Vault::open(&vpath, &k).unwrap();
+    assert!(v.extract(&out, &[], true).is_err());
+    assert_eq!(fs::read(out.join("f.txt")).unwrap(), b"precious original");
+    let leftovers: Vec<_> = fs::read_dir(&out)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(leftovers.len(), 1, "temp files left behind: {leftovers:?}");
+}
+
+/// Review finding M1: extraction must replace a link, never write through it.
+#[cfg(unix)]
+#[test]
+fn overwrite_replaces_link_instead_of_writing_through() {
+    use std::os::unix::fs::symlink;
+    let dir = TempDir::new().unwrap();
+    let f = dir.path().join("f.txt");
+    fs::write(&f, b"from vault").unwrap();
+    let k = key();
+    let vpath = dir.path().join("v.svault");
+    let (v, _) = Vault::create(&vpath, &k, &[f]).unwrap();
+    let outside = dir.path().join("outside.txt");
+    fs::write(&outside, b"outside").unwrap();
+    let out = dir.path().join("out");
+    fs::create_dir(&out).unwrap();
+    symlink(&outside, out.join("f.txt")).unwrap();
+    v.extract(&out, &[], true).unwrap();
+    assert_eq!(fs::read(&outside).unwrap(), b"outside");
+    assert_eq!(fs::read(out.join("f.txt")).unwrap(), b"from vault");
+}
+
+/// Review finding M2: a planted file or link at a predictable temp name is
+/// irrelevant, and no temp files are left after normal operation.
+#[test]
+fn no_temp_files_left_behind() {
+    let dir = TempDir::new().unwrap();
+    let f = dir.path().join("f.txt");
+    fs::write(&f, b"x").unwrap();
+    fs::write(dir.path().join("v.svault.tmp"), b"planted").unwrap();
+    let k = key();
+    let vpath = dir.path().join("v.svault");
+    let (mut v, _) = Vault::create(&vpath, &k, std::slice::from_ref(&f)).unwrap();
+    v.remove(&["f.txt".into()]).unwrap();
+    v.add(&[f], false).unwrap();
+    assert_eq!(
+        fs::read(dir.path().join("v.svault.tmp")).unwrap(),
+        b"planted"
+    );
+    let names: Vec<String> = fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(!names.iter().any(|n| n.ends_with(".svtmp")), "{names:?}");
+}
+
+/// Review finding M4: a far-future modification time must not panic.
+#[test]
+fn far_future_mtime_does_not_panic() {
+    let dir = TempDir::new().unwrap();
+    let f = dir.path().join("f.txt");
+    fs::write(&f, b"x").unwrap();
+    let file = fs::File::options().write(true).open(&f).unwrap();
+    let far = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1 << 40);
+    let _ = file.set_modified(far);
+    drop(file);
+    let k = key();
+    let vpath = dir.path().join("v.svault");
+    let (v, _) = Vault::create(&vpath, &k, &[f]).unwrap();
+    v.extract(&dir.path().join("out"), &[], false).unwrap();
+}
+
+/// Review finding M2: two writers cannot change the same vault at once.
+#[test]
+fn concurrent_change_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let f = dir.path().join("f.txt");
+    fs::write(&f, b"x").unwrap();
+    let k = key();
+    let vpath = dir.path().join("v.svault");
+    let (mut v, _) = Vault::create(&vpath, &k, std::slice::from_ref(&f)).unwrap();
+    let other = fs::File::open(&vpath).unwrap();
+    other.lock().unwrap();
+    assert!(v.remove(&["f.txt".into()]).is_err());
+    other.unlock().unwrap();
+    v.remove(&["f.txt".into()]).unwrap();
 }

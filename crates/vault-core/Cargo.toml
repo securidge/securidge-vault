@@ -9,13 +9,16 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+argon2 = { version = "0.5", default-features = false, features = ["alloc", "zeroize"] }
 chacha20poly1305 = { version = "0.10", features = ["stream"] }
 getrandom = "0.2"
 thiserror = "1"
 unicode-normalization = "0.1"
 zeroize = { version = "1", features = ["derive"] }
 zstd = "0.13"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

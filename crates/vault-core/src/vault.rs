@@ -19,7 +19,7 @@
 //! copied as ciphertext, not re-encrypted. Old index blocks therefore never
 //! survive, which prevents rolling a vault back to an earlier file list.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
@@ -30,7 +30,7 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use zeroize::Zeroizing;
 
-use crate::fsutil::tmp_path;
+use crate::fsutil;
 use crate::keyfile::{KeyId, UnlockedKey};
 use crate::{index, pathsafe, rng, Error, Result};
 
@@ -165,8 +165,14 @@ impl Vault {
 
     /// Opens a vault and decrypts its file list.
     pub fn open(path: &Path, key: &UnlockedKey) -> Result<Vault> {
-        let mut f = File::open(path)?;
-        let header = read_header(&mut f)?;
+        Self::open_from(path, &mut File::open(path)?, key)
+    }
+
+    /// Opens a vault through an already open handle (used while locked:
+    /// on Windows a locked file cannot be read through another handle).
+    fn open_from(path: &Path, f: &mut File, key: &UnlockedKey) -> Result<Vault> {
+        f.seek(SeekFrom::Start(0))?;
+        let header = read_header(f)?;
         let fek = header.unwrap_fek(key)?;
         let file_len = f.metadata()?.len();
         if file_len < (HEADER_LEN + TRAILER_LEN) as u64 {
@@ -221,16 +227,24 @@ impl Vault {
         key: &UnlockedKey,
         inputs: &[PathBuf],
     ) -> Result<(Vault, Vec<PathBuf>)> {
-        if path.exists() {
-            return Err(Error::DestinationExists(path.to_path_buf()));
-        }
         let (files, skipped) = collect_inputs(inputs)?;
         if files.is_empty() {
             return Err(Error::InvalidInput("nothing to add".into()));
         }
         let fek = Zeroizing::new(rng::array::<32>());
         let header = Header::new(key, &fek)?;
-        let entries = write_vault(path, &header, &fek, None, &[], &files)?;
+        // Reserve the name first so we never replace a file that appears
+        // while we are writing.
+        fsutil::reserve_new(path)?;
+        let entries = match write_vault(path, &header, &fek, None, &[], &files)
+            .and_then(|st| st.commit(path))
+        {
+            Ok(e) => e,
+            Err(e) => {
+                fsutil::remove_placeholder(path);
+                return Err(e);
+            }
+        };
         Ok((
             Vault {
                 path: path.to_path_buf(),
@@ -309,32 +323,52 @@ impl Vault {
         for e in &selected {
             let target = pathsafe::prepare_target(&root, &e.path)?;
             match fs::symlink_metadata(&target) {
-                Ok(_) if !overwrite => return Err(Error::DestinationExists(target)),
-                Ok(m) if m.file_type().is_symlink() || m.is_dir() => {
+                Ok(m) if m.is_dir() => {
                     return Err(Error::UnsafePath(format!(
-                        "{} is a link or folder",
+                        "{} is a folder",
                         target.display()
-                    )));
+                    )))
                 }
+                Ok(_) if !overwrite => return Err(Error::DestinationExists(target)),
                 _ => {}
             }
-            let out = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&target)?;
+            // Never write into an existing file: decrypt into a fresh temp
+            // file, then rename it into place. Renaming replaces a link
+            // instead of writing through it, and a failed entry never
+            // touches the user's original file.
+            if !overwrite {
+                fsutil::reserve_new(&target)?;
+            }
+            let (tmp, f) = fsutil::create_tmp(&target)?;
             let result = (|| -> Result<()> {
-                let mut w = BufWriter::new(out);
+                let mut w = BufWriter::new(f);
                 decrypt_entry(&mut src, e, &self.fek, &aad, &mut w)?;
                 let f = w.into_inner().map_err(|e| Error::Io(e.into_error()))?;
-                f.sync_all()?;
                 if e.modified > 0 {
-                    let _ = f.set_modified(UNIX_EPOCH + Duration::from_secs(e.modified as u64));
+                    if let Some(t) = UNIX_EPOCH.checked_add(Duration::from_secs(e.modified as u64))
+                    {
+                        let _ = f.set_modified(t);
+                    }
+                }
+                f.sync_all()?;
+                drop(f);
+                fsutil::commit(&tmp, &target)?;
+                // Detect a folder swapped for a link while we were writing.
+                let parent = target.parent().unwrap_or(&root).canonicalize()?;
+                if !parent.starts_with(&root) {
+                    let _ = fs::remove_file(&target);
+                    return Err(Error::UnsafePath(format!(
+                        "{} moved outside the destination during extraction",
+                        target.display()
+                    )));
                 }
                 Ok(())
             })();
             if let Err(err) = result {
-                let _ = fs::remove_file(&target);
+                let _ = fs::remove_file(&tmp);
+                if !overwrite {
+                    fsutil::remove_placeholder(&target);
+                }
                 return Err(err);
             }
             done.push(e.path.clone());
@@ -365,36 +399,70 @@ impl Vault {
         Ok(out)
     }
 
-    fn rewrite(&mut self, keep: &[Entry], files: &[(PathBuf, String)]) -> Result<()> {
+    fn rewrite(&mut self, keep: &[Entry], files: &[SourceFile]) -> Result<()> {
         let path = self.path.clone();
-        let entries = write_vault(&path, &self.header, &self.fek, Some(&path), keep, files)?;
-        self.entries = entries;
+        let mut lock = lock_vault(&path)?;
+        let old = OldVault {
+            reader: &mut lock,
+            reencrypt_from: None,
+        };
+        let staged = write_vault(&path, &self.header, &self.fek, Some(old), keep, files)?;
+        drop(lock);
+        self.entries = staged.commit(&path)?;
         Ok(())
     }
 }
 
-/// Moves a vault to a new key (DESIGN.md §4.5). Verifies the whole file
-/// list first, then rewrites only the header. Entry data is untouched.
+/// Moves a vault to a new key (DESIGN.md §4.5).
+///
+/// Generates a new FEK and a new `vault_id` and re-encrypts every entry
+/// (decrypt chunk with the old FEK, encrypt with the new one; no
+/// recompression). Afterwards nothing in the vault can be read with the old
+/// key, and old headers cannot be spliced onto the new file.
 pub fn rekey(path: &Path, old: &UnlockedKey, new: &UnlockedKey) -> Result<()> {
-    let vault = Vault::open(path, old)?;
-    let new_header = vault.header.rewrap(&vault.fek, new)?;
-    drop(vault);
+    let mut lock = lock_vault(path)?;
+    let vault = Vault::open_from(path, &mut lock, old)?;
+    let new_fek = Zeroizing::new(rng::array::<32>());
+    let new_header = Header::new(new, &new_fek)?;
+    let old_aad = vault.header.aad(DOMAIN_ENTRY);
+    let source = OldVault {
+        reader: &mut lock,
+        reencrypt_from: Some((&vault.fek, &old_aad)),
+    };
+    let staged = write_vault(
+        path,
+        &new_header,
+        &new_fek,
+        Some(source),
+        &vault.entries,
+        &[],
+    )?;
+    drop(lock);
+    staged.commit(path)?;
+    Ok(())
+}
 
-    let tmp = tmp_path(path);
-    let result = (|| -> Result<()> {
-        fs::copy(path, &tmp)?;
-        let mut f = OpenOptions::new().write(true).open(&tmp)?;
-        f.write_all(&new_header.0)?;
-        f.sync_all()?;
-        Ok(())
-    })();
-    match result {
-        Ok(()) => Ok(fs::rename(&tmp, path)?),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
+/// Advisory exclusive lock on a vault while it is being rewritten, so two
+/// processes cannot change the same vault at once.
+fn lock_vault(path: &Path) -> Result<File> {
+    let f = File::open(path)?;
+    match f.try_lock() {
+        Ok(()) => Ok(f),
+        Err(fs::TryLockError::WouldBlock) => Err(Error::InvalidInput(format!(
+            "{} is being changed by another process",
+            path.display()
+        ))),
+        Err(fs::TryLockError::Error(e)) => Err(e.into()),
     }
+}
+
+/// The existing vault that kept entries are taken from.
+struct OldVault<'a> {
+    /// Handle to the existing vault (the locked one).
+    reader: &'a mut File,
+    /// `Some((old FEK, old entry AAD))` to re-encrypt kept entries under the
+    /// new FEK (rekey); `None` to copy their ciphertext verbatim.
+    reencrypt_from: Option<(&'a [u8; 32], &'a [u8])>,
 }
 
 fn read_header(f: &mut File) -> Result<Header> {
@@ -406,39 +474,70 @@ fn read_header(f: &mut File) -> Result<Header> {
     Header::parse(h)
 }
 
-/// Writes a complete vault to `<target>.tmp` and renames it over `target`.
-/// `old` is the existing vault from which `keep` entries are copied.
+/// A fully written and synced temp file, not yet renamed into place.
+struct Staged {
+    tmp: PathBuf,
+    entries: Vec<Entry>,
+}
+
+impl Staged {
+    fn commit(self, target: &Path) -> Result<Vec<Entry>> {
+        match fsutil::commit(&self.tmp, target) {
+            Ok(()) => Ok(self.entries),
+            Err(e) => {
+                let _ = fs::remove_file(&self.tmp);
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Writes a complete vault to a temp file next to `target`. The caller
+/// renames it into place with [`Staged::commit`] (after releasing the lock).
+/// `old` is the existing vault from which `keep` entries are taken.
 fn write_vault(
     target: &Path,
     header: &Header,
     fek: &[u8; 32],
-    old: Option<&Path>,
+    old: Option<OldVault<'_>>,
     keep: &[Entry],
-    files: &[(PathBuf, String)],
-) -> Result<Vec<Entry>> {
-    let tmp = tmp_path(target);
+    files: &[SourceFile],
+) -> Result<Staged> {
+    if keep.len() + files.len() > index::MAX_ENTRIES as usize {
+        return Err(Error::LimitExceeded("too many files for one vault"));
+    }
+    let (tmp, tmp_file) = fsutil::create_tmp(target)?;
     let result = (|| -> Result<Vec<Entry>> {
-        let mut w = BufWriter::new(File::create(&tmp)?);
+        let mut w = BufWriter::new(tmp_file);
         w.write_all(&header.0)?;
         let mut pos = HEADER_LEN as u64;
         let mut out = Vec::with_capacity(keep.len() + files.len());
+        let aad = header.aad(DOMAIN_ENTRY);
 
         if let Some(old) = old {
-            let mut r = File::open(old)?;
+            let mut r = BufReader::new(&mut *old.reader);
             for e in keep {
-                r.seek(SeekFrom::Start(e.offset))?;
-                let copied = io::copy(&mut (&mut r).take(e.length), &mut w)?;
-                if copied != e.length {
-                    return Err(Error::Tampered);
-                }
-                let mut ne = e.clone();
-                ne.offset = pos;
-                pos += e.length;
+                let ne = match old.reencrypt_from {
+                    None => {
+                        r.seek(SeekFrom::Start(e.offset))?;
+                        let copied = io::copy(&mut (&mut r).take(e.length), &mut w)?;
+                        if copied != e.length {
+                            return Err(Error::Tampered);
+                        }
+                        Entry {
+                            offset: pos,
+                            ..e.clone()
+                        }
+                    }
+                    Some((old_fek, old_aad)) => {
+                        reencrypt_entry(&mut r, e, old_fek, old_aad, &mut w, fek, &aad, pos)?
+                    }
+                };
+                pos += ne.length;
                 out.push(ne);
             }
         }
 
-        let aad = header.aad(DOMAIN_ENTRY);
         for (src, name) in files {
             let e = encrypt_entry(&mut w, src, name, fek, &aad, pos)?;
             pos += e.length;
@@ -471,10 +570,7 @@ fn write_vault(
         Ok(out)
     })();
     match result {
-        Ok(entries) => {
-            fs::rename(&tmp, target)?;
-            Ok(entries)
-        }
+        Ok(entries) => Ok(Staged { tmp, entries }),
         Err(e) => {
             let _ = fs::remove_file(&tmp);
             Err(e)
@@ -517,7 +613,7 @@ fn encrypt_entry<W: Write>(
     aad: &[u8],
     offset: u64,
 ) -> Result<Entry> {
-    let file = File::open(src)?;
+    let file = fsutil::open_regular_nofollow(src)?;
     let modified = file
         .metadata()?
         .modified()
@@ -625,6 +721,83 @@ fn map_write_err(e: io::Error) -> Error {
     } else {
         Error::Io(e)
     }
+}
+
+/// Re-encrypts one entry's chunks from `old_fek` to `new_fek` without
+/// decompressing. Chunk sizes are unchanged, so the length is unchanged.
+#[allow(clippy::too_many_arguments)]
+fn reencrypt_entry<R: Read + Seek, W: Write>(
+    r: &mut R,
+    e: &Entry,
+    old_fek: &[u8; 32],
+    old_aad: &[u8],
+    w: &mut W,
+    new_fek: &[u8; 32],
+    new_aad: &[u8],
+    offset: u64,
+) -> Result<Entry> {
+    r.seek(SeekFrom::Start(e.offset))?;
+    let mut dec = DecryptorBE32::from_aead(
+        XChaCha20Poly1305::new(Key::from_slice(old_fek)),
+        GenericArray::from_slice(&e.nonce_prefix),
+    );
+    let nonce_prefix: [u8; STREAM_NONCE_LEN] = rng::array();
+    let mut enc = EncryptorBE32::from_aead(
+        XChaCha20Poly1305::new(Key::from_slice(new_fek)),
+        GenericArray::from_slice(&nonce_prefix),
+    );
+    let full = e.chunk_size as u64 + TAG_LEN;
+    let mut buf = vec![0u8; full as usize];
+    let mut remaining = e.length;
+    let mut written = 0u64;
+    loop {
+        if remaining > full {
+            r.read_exact(&mut buf)?;
+            let pt = Zeroizing::new(
+                dec.decrypt_next(Payload {
+                    msg: &buf,
+                    aad: old_aad,
+                })
+                .map_err(|_| Error::Tampered)?,
+            );
+            let ct = enc
+                .encrypt_next(Payload {
+                    msg: &pt,
+                    aad: new_aad,
+                })
+                .map_err(|_| Error::Crypto)?;
+            w.write_all(&ct)?;
+            written += ct.len() as u64;
+            remaining -= full;
+        } else {
+            let n = remaining as usize;
+            r.read_exact(&mut buf[..n])?;
+            let pt = Zeroizing::new(
+                dec.decrypt_last(Payload {
+                    msg: &buf[..n],
+                    aad: old_aad,
+                })
+                .map_err(|_| Error::Tampered)?,
+            );
+            let ct = enc
+                .encrypt_last(Payload {
+                    msg: &pt,
+                    aad: new_aad,
+                })
+                .map_err(|_| Error::Crypto)?;
+            w.write_all(&ct)?;
+            written += ct.len() as u64;
+            break;
+        }
+    }
+    if written != e.length {
+        return Err(Error::Crypto);
+    }
+    Ok(Entry {
+        offset,
+        nonce_prefix,
+        ..e.clone()
+    })
 }
 
 /// Decrypts, authenticates and decompresses one entry into `out`. Each chunk
