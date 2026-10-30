@@ -26,7 +26,15 @@ jobs:
       - name: Lint
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Test
-        run: cargo test --locked
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! cargo test --locked 2>&1 | tee test.log; then
+            # Surface failures as one annotation (readable without log access).
+            msg=$(grep -E "panicked|FAILED|^---- |Error|error|left|right|thread" test.log | head -60 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=cargo test failed::${msg}"
+            exit 1
+          fi
 
   build-windows:
     name: Build Windows binary
